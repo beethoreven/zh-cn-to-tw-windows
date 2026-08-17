@@ -6,6 +6,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>..\..\packaging\AppIcon.ico</ApplicationIcon>
+    <!-- appMajor/appMinor 在 MainWindow.xaml.cs 的 BuildDesktopUrl 裡是
+         獨立寫死的常數，跟這裡的組件版本沒有連動，故意的：那個值影響
+         的是後端 version_check 的回報內容，這裡的版本只影響 Windows
+         檔案總管「內容」分頁看到的版本資訊，兩者現階段沒有共用同一個
+         版本追蹤機制（見 zh-cn-to-tw-windows README「已知限制」）。 -->
+    <Version>1.2.0.0</Version>
+    <FileVersion>1.2.0.0</FileVersion>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
