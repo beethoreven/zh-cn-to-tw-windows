@@ -47,10 +47,17 @@ public partial class MainWindow : Window
     // 這個物件被提早回收。
     private GoogleDesktopSignIn? _activeSignIn;
 
+    private readonly OcrServiceManager _ocrServiceManager = new(OcrServiceManager.ResolveExecutable);
+
     public MainWindow()
     {
         InitializeComponent();
+        _ocrServiceManager.StateChanged += () => Dispatcher.Invoke(PushOcrPort);
         Loaded += async (_, _) => await InitializeWebViewAsync();
+        // App 關閉時務必把 OCR 子行程收乾淨——雖然 ProcessJobObject 已經
+        // 提供「殼被系統砍掉」那種異常情況下的保險，但正常關閉時應該
+        // 直接主動關，不用等作業系統層級的機制介入。
+        Closed += (_, _) => _ocrServiceManager.Stop();
     }
 
     private async Task InitializeWebViewAsync()
@@ -95,6 +102,10 @@ public partial class MainWindow : Window
         // 方便之後如果真的觀察到需要再加。
         core.ProcessFailed += (_, args) =>
             System.Diagnostics.Trace.WriteLine($"[webview-process-failed] {args.ProcessFailedKind}：{args.Reason}");
+        // 頁面（重新）載好之後，window 是全新的，之前推進去的
+        // window.__OCR_PORT__ 會跟著消失——對應 Mac 版 WebView.swift 的
+        // didFinish 補推邏輯，每次導覽完成都重新推一次目前最新的值。
+        core.NavigationCompleted += (_, _) => PushOcrPort();
 
         var (kind, target) = ResolveWebSource();
         switch (kind)
@@ -119,12 +130,16 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 把 base URL 接上 ?desktop=1&amp;... 這些查詢參數，對應 Mac 版
-    /// ContentView.desktopURL()。ocrToken 是這次啟動生成的隨機值（整個
-    /// App 生命週期固定，放網址上沒問題）；apiBase 預設打正式 Render
+    /// ContentView.desktopURL()。ocrToken 一定要用 _ocrServiceManager.Token
+    /// 這個真正的值（早期版本這裡曾經誤用另外產生的隨機值，跟
+    /// OCR_SERVICE_TOKEN 傳給子行程的值對不上，本機 OCR 服務的
+    /// X-OCR-Token 驗證會全部被拒絕）；apiBase 預設打正式 Render
     /// 後端，WEB_API_BASE_OVERRIDE 只在開發階段用來指到本機另外跑的
-    /// backend。appMajor/appMinor/osTier 目前先寫死——Windows 版還沒有
-    /// 自己的版本追蹤機制（見 zh-cn-to-tw-backend 的 app_versions
-    /// 表），之後要接上真正的版本號時再改。
+    /// backend。appMajor/appMinor 目前寫死成 1.2，只是為了跟 Mac 版
+    /// 這次同步採用 rapidocr_onnxruntime 的版本號對齊，不是真正的
+    /// 版本追蹤機制——Windows 版還沒有自己的 build 編號/發布流程，
+    /// 之後要接上真正的版本追蹤時再改（見 zh-cn-to-tw-backend 的
+    /// app_versions 表）。
     ///
     /// osTier 刻意不能沿用 Mac 版的 "13+"：zh-cn-to-tw-web 的
     /// script.js 呼叫 /api/version_check 時 os 參數是寫死的
@@ -140,20 +155,34 @@ public partial class MainWindow : Window
     /// 資料時一律不擋」）。之後 Windows 版有自己的版本追蹤機制時，
     /// 這裡跟 script.js 的 os=macos 硬編碼都要一併檢討。
     /// </summary>
-    private static Uri BuildDesktopUrl(string baseUrl)
+    private Uri BuildDesktopUrl(string baseUrl)
     {
-        var ocrToken = Guid.NewGuid().ToString("N");
         var apiBase = Environment.GetEnvironmentVariable("WEB_API_BASE_OVERRIDE")
             ?? "https://zh-cn-to-tw-backend.onrender.com";
         var separator = baseUrl.Contains('?') ? '&' : '?';
         var query = string.Join("&",
             "desktop=1",
-            $"ocrToken={Uri.EscapeDataString(ocrToken)}",
+            $"ocrToken={Uri.EscapeDataString(_ocrServiceManager.Token)}",
             $"apiBase={Uri.EscapeDataString(apiBase)}",
-            "appMajor=0",
-            "appMinor=1",
+            "appMajor=1",
+            "appMinor=2",
             "osTier=windows");
         return new Uri($"{baseUrl}{separator}{query}");
+    }
+
+    /// <summary>
+    /// 把最新的 OCR port 寫進頁面的 window.__OCR_PORT__（見
+    /// zh-cn-to-tw-web 的 script.js 的 desktopOcrBase()）。刻意不重新
+    /// 載入頁面——服務自己開開關關是背景行為，不該把使用者做到一半的
+    /// 工作狀態清掉。一定要在 UI 執行緒上呼叫（OcrServiceManager 的
+    /// StateChanged 可能從背景執行緒觸發，建構子裡已經用
+    /// Dispatcher.Invoke 包過）。
+    /// </summary>
+    private void PushOcrPort()
+    {
+        if (Browser.CoreWebView2 is null) return;
+        var value = _ocrServiceManager.Port?.ToString() ?? "null";
+        _ = Browser.CoreWebView2.ExecuteScriptAsync($"window.__OCR_PORT__ = {value};");
     }
 
     private void ReloadButton_Click(object sender, RoutedEventArgs e)
@@ -226,18 +255,24 @@ public partial class MainWindow : Window
         }
     }
 
-    // 本機 OCR 服務（PaddleOCR）目前還沒有 Windows 版的執行檔——
-    // zh-cn-to-tw-ocr-service 這個子系統還沒移植，屬於 Windows 版
-    // Stage 2（套件/版本相容性）要處理的範圍。這裡先只接住訊息、
-    // 不讓 JS 端因為呼叫了不存在的原生功能而拋例外；網頁那邊
-    // ensureDesktopOcrReady() 本身有 30 秒逾時保護，會自己丟出清楚的
-    // 錯誤訊息（「本機 OCR 服務啟動逾時」），不需要殼這邊額外處理。
-    private static void HandleOcrService(JsonElement body)
+    private void HandleOcrService(JsonElement body)
     {
         var action = body.ValueKind == JsonValueKind.Object && body.TryGetProperty("action", out var a)
             ? a.GetString()
             : null;
-        System.Diagnostics.Trace.WriteLine($"[ocr-service] 收到 {action}（Windows 版 OCR 服務尚未實作，暫不處理）");
+        switch (action)
+        {
+            case "start":
+                _ocrServiceManager.EnsureRunning();
+                break;
+            case "stop":
+                _ocrServiceManager.Stop();
+                PushOcrPort();
+                break;
+            default:
+                System.Diagnostics.Trace.WriteLine($"[ocr-service] 不認得的指令：{action}");
+                break;
+        }
     }
 
     [DllImport("kernel32.dll")]
