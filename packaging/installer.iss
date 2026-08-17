@@ -12,7 +12,14 @@
 ; OcrServiceManager.ResolveExecutable() 找 web\/ocr-service\ 子資料夾的
 ; 邏輯一一對應。
 
-#define MyAppName "劇本殺繁化助手"
+; MyAppName（顯示名稱，Start Menu/桌面捷徑/解除安裝清單看到的字）跟
+; OutputBaseFilename（安裝檔實際檔名）刻意分開處理：前者用中文
+; 「繁化助手」跟 Mac 版 Info.plist 的 CFBundleDisplayName 對齊，後者
+; 保持 ASCII「ZhCnToTw」——Mac 版發布 DMG 到 GitHub Release 時實測撞過
+; `gh` CLI 會把上傳檔名開頭的 CJK 位元組吃掉（見 zh-cn-to-tw-mac
+; README「已知的坑」），Release 資產檔名維持 ASCII 直接避開這個問題，
+; 不需要每次發布再手動重新命名一次。
+#define MyAppName "繁化助手"
 #define MyAppVersion "1.3"
 #define MyAppExeName "ZhCnToTw.exe"
 
