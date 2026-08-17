@@ -106,6 +106,18 @@ public partial class MainWindow : Window
         // window.__OCR_PORT__ 會跟著消失——對應 Mac 版 WebView.swift 的
         // didFinish 補推邏輯，每次導覽完成都重新推一次目前最新的值。
         core.NavigationCompleted += (_, _) => PushOcrPort();
+        // 下載（Stage 1/2 的「下載結果」按鈕，走 fetch+blob+<a download>
+        // 這條標準路徑，WebView2 原生就認得）預設會存到系統的「下載」
+        // 資料夾，改成存到桌面——ResultFilePath 進來時已經是 WebView2
+        // 自己組好的「下載資料夾 + 建議檔名」路徑，這裡只取檔名部分，
+        // 換掉目錄；檔名沿用既有的 UniqueDestination 邏輯避免覆蓋掉
+        // 使用者前一次下載的同名檔案。
+        core.DownloadStarting += (_, args) =>
+        {
+            var desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            var suggestedName = Path.GetFileName(args.ResultFilePath);
+            args.ResultFilePath = UniqueDestination(desktopDir, suggestedName);
+        };
 
         var (kind, target) = ResolveWebSource();
         switch (kind)
@@ -135,10 +147,10 @@ public partial class MainWindow : Window
     /// OCR_SERVICE_TOKEN 傳給子行程的值對不上，本機 OCR 服務的
     /// X-OCR-Token 驗證會全部被拒絕）；apiBase 預設打正式 Render
     /// 後端，WEB_API_BASE_OVERRIDE 只在開發階段用來指到本機另外跑的
-    /// backend。appMajor/appMinor 目前寫死成 1.2，只是為了跟 Mac 版
-    /// 這次同步採用 rapidocr_onnxruntime 的版本號對齊，不是真正的
-    /// 版本追蹤機制——Windows 版還沒有自己的 build 編號/發布流程，
-    /// 之後要接上真正的版本追蹤時再改（見 zh-cn-to-tw-backend 的
+    /// backend。appMajor/appMinor 目前寫死成跟 Mac 版同步的版本號（每次
+    /// Mac 版出新版、Windows 版跟著補上功能對等的改動時一起手動更新），
+    /// 不是真正的版本追蹤機制——Windows 版還沒有自己的 build 編號/發布
+    /// 流程，之後要接上真正的版本追蹤時再改（見 zh-cn-to-tw-backend 的
     /// app_versions 表）。
     ///
     /// osTier 刻意不能沿用 Mac 版的 "13+"：zh-cn-to-tw-web 的
@@ -165,7 +177,7 @@ public partial class MainWindow : Window
             $"ocrToken={Uri.EscapeDataString(_ocrServiceManager.Token)}",
             $"apiBase={Uri.EscapeDataString(apiBase)}",
             "appMajor=1",
-            "appMinor=2",
+            "appMinor=3",
             "osTier=windows");
         return new Uri($"{baseUrl}{separator}{query}");
     }
@@ -309,11 +321,11 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 對應 Mac 版 12- 分流的 legacyDownload channel：網頁把檔案內容轉成
-    /// base64 直接 postMessage 過來，這裡解碼寫進「下載」資料夾。
-    /// script.js 只有在 osTier === "12-" 才會走這條路，這支殼目前固定
-    /// 回報 "13+"（見 BuildDesktopUrl），正常情況下載會走
-    /// DownloadStarting 那條標準路徑，不會用到這裡——這裡實作只是求
-    /// 完整、當作備援，不是目前預期會被觸發的路徑。
+    /// base64 直接 postMessage 過來，這裡解碼寫進桌面。script.js 只有在
+    /// osTier === "12-" 才會走這條路，這支殼固定回報 "windows"（見
+    /// BuildDesktopUrl），正常情況下載會走 DownloadStarting 那條標準
+    /// 路徑，不會用到這裡——這裡實作只是求完整、當作備援，不是目前預期
+    /// 會被觸發的路徑。
     /// </summary>
     private static void HandleLegacyDownload(JsonElement body)
     {
@@ -329,9 +341,8 @@ public partial class MainWindow : Window
         try
         {
             var data = Convert.FromBase64String(base64El.GetString() ?? "");
-            var downloadsDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
-            var destination = UniqueDestination(downloadsDir, filename);
+            var desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            var destination = UniqueDestination(desktopDir, filename);
             File.WriteAllBytes(destination, data);
         }
         catch (Exception ex)

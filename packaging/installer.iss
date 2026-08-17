@@ -13,7 +13,7 @@
 ; 邏輯一一對應。
 
 #define MyAppName "劇本殺繁化助手"
-#define MyAppVersion "1.2"
+#define MyAppVersion "1.3"
 #define MyAppExeName "ZhCnToTw.exe"
 
 [Setup]
