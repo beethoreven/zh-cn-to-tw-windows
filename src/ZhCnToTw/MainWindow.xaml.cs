@@ -55,15 +55,35 @@ public partial class MainWindow : Window
 
     private async Task InitializeWebViewAsync()
     {
-        // 跟 Mac 版一樣，把 WebView2 的使用者資料夾放到 %LocalAppData%，不要
-        // 用預設值（緊鄰執行檔的資料夾）。這支殼之後打包上線會被裝到
-        // Program Files 底下，一般使用者帳號對那裡沒有寫入權限，
-        // CoreWebView2 建立 profile 時會直接失敗。
-        var userDataFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ZhCnToTw", "WebView2");
-        var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
-        await Browser.EnsureCoreWebView2Async(environment);
+        try
+        {
+            // 跟 Mac 版一樣，把 WebView2 的使用者資料夾放到 %LocalAppData%，不要
+            // 用預設值（緊鄰執行檔的資料夾）。這支殼之後打包上線會被裝到
+            // Program Files 底下，一般使用者帳號對那裡沒有寫入權限，
+            // CoreWebView2 建立 profile 時會直接失敗。
+            var userDataFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ZhCnToTw", "WebView2");
+            var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+            await Browser.EnsureCoreWebView2Async(environment);
+        }
+        catch (Exception ex)
+        {
+            // 這裡掛在 Loaded 的 async void lambda 底下——沒有這層
+            // try/catch 的話，任何初始化失敗（最現實的情境：機器上沒裝
+            // WebView2 Runtime，見 README「已知限制」，偵測/靜默安裝是
+            // Stage 2/3 才要做的事）都會變成未處理例外，整個 App 直接
+            // 無預警崩潰，使用者只會看到視窗憑空消失，完全不知道發生
+            // 什麼事。先攔下來給一個看得懂的訊息，好過一句話都沒有的
+            // 崩潰。
+            System.Diagnostics.Trace.WriteLine($"[webview-init] 初始化失敗：{ex}");
+            MessageBox.Show(
+                $"無法啟動內嵌瀏覽器元件（WebView2），App 無法繼續執行。\n\n" +
+                $"可能是這台機器還沒安裝 Microsoft Edge WebView2 Runtime。\n\n錯誤訊息：{ex.Message}",
+                "初始化失敗", MessageBoxButton.OK, MessageBoxImage.Error);
+            Close();
+            return;
+        }
 
         var core = Browser.CoreWebView2;
         await core.AddScriptToExecuteOnDocumentCreatedAsync(BridgeShimScript);
@@ -74,7 +94,7 @@ public partial class MainWindow : Window
         // 那種整個物件拆掉重建、換原生提示畫面的複雜度，只留 log
         // 方便之後如果真的觀察到需要再加。
         core.ProcessFailed += (_, args) =>
-            System.Diagnostics.Debug.WriteLine($"[webview-process-failed] {args.ProcessFailedKind}：{args.Reason}");
+            System.Diagnostics.Trace.WriteLine($"[webview-process-failed] {args.ProcessFailedKind}：{args.Reason}");
 
         var (kind, target) = ResolveWebSource();
         switch (kind)
@@ -153,7 +173,7 @@ public partial class MainWindow : Window
             switch (channel)
             {
                 case "consoleLog":
-                    System.Diagnostics.Debug.WriteLine($"[webview-console] {body}");
+                    System.Diagnostics.Trace.WriteLine($"[webview-console] {body}");
                     break;
                 case "desktopSignIn":
                     await HandleDesktopSignInAsync();
@@ -168,13 +188,13 @@ public partial class MainWindow : Window
                     HandleLegacyDownload(body);
                     break;
                 default:
-                    System.Diagnostics.Debug.WriteLine($"[webview-bridge] 不認得的 channel：{channel}");
+                    System.Diagnostics.Trace.WriteLine($"[webview-bridge] 不認得的 channel：{channel}");
                     break;
             }
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[webview-bridge] 處理訊息失敗：{ex}");
+            System.Diagnostics.Trace.WriteLine($"[webview-bridge] 處理訊息失敗：{ex}");
         }
     }
 
@@ -195,7 +215,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[desktop-signin] 失敗：{ex}");
+            System.Diagnostics.Trace.WriteLine($"[desktop-signin] 失敗：{ex}");
             var message = ex.Message.Replace("'", "\\'");
             await Browser.CoreWebView2.ExecuteScriptAsync(
                 $"window.alert && window.alert('登入失敗，請重試（{message}）')");
@@ -217,7 +237,7 @@ public partial class MainWindow : Window
         var action = body.ValueKind == JsonValueKind.Object && body.TryGetProperty("action", out var a)
             ? a.GetString()
             : null;
-        System.Diagnostics.Debug.WriteLine($"[ocr-service] 收到 {action}（Windows 版 OCR 服務尚未實作，暫不處理）");
+        System.Diagnostics.Trace.WriteLine($"[ocr-service] 收到 {action}（Windows 版 OCR 服務尚未實作，暫不處理）");
     }
 
     [DllImport("kernel32.dll")]
@@ -247,7 +267,7 @@ public partial class MainWindow : Window
                 SetThreadExecutionState(EsContinuous);
                 break;
             default:
-                System.Diagnostics.Debug.WriteLine($"[activity-guard] 不認得的指令：{action}");
+                System.Diagnostics.Trace.WriteLine($"[activity-guard] 不認得的指令：{action}");
                 break;
         }
     }
@@ -266,7 +286,7 @@ public partial class MainWindow : Window
             || !body.TryGetProperty("filename", out var filenameEl)
             || !body.TryGetProperty("base64", out var base64El))
         {
-            System.Diagnostics.Debug.WriteLine("[legacy-download] 收到的訊息格式不對");
+            System.Diagnostics.Trace.WriteLine("[legacy-download] 收到的訊息格式不對");
             return;
         }
 
@@ -281,7 +301,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[legacy-download] 寫檔失敗：{ex}");
+            System.Diagnostics.Trace.WriteLine($"[legacy-download] 寫檔失敗：{ex}");
         }
     }
 
