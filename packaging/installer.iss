@@ -27,7 +27,7 @@
 AppId={{25D707A1-4FA6-430D-BE9D-0BC19672C4B5}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppPublisher=beethoreven
+AppPublisher=阿舍老師
 DefaultDirName={localappdata}\Programs\ZhCnToTw
 DefaultGroupName={#MyAppName}
 PrivilegesRequired=lowest
