@@ -177,7 +177,7 @@ public partial class MainWindow : Window
             $"ocrToken={Uri.EscapeDataString(_ocrServiceManager.Token)}",
             $"apiBase={Uri.EscapeDataString(apiBase)}",
             "appMajor=1",
-            "appMinor=3",
+            "appMinor=4",
             "osTier=windows");
         return new Uri($"{baseUrl}{separator}{query}");
     }
