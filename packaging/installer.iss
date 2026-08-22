@@ -20,7 +20,7 @@
 ; README「已知的坑」），Release 資產檔名維持 ASCII 直接避開這個問題，
 ; 不需要每次發布再手動重新命名一次。
 #define MyAppName "繁化助手"
-#define MyAppVersion "1.4"
+#define MyAppVersion "1.5"
 #define MyAppExeName "ZhCnToTw.exe"
 
 [Setup]

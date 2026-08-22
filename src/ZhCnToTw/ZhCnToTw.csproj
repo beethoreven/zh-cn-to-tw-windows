@@ -12,9 +12,9 @@
          的是後端 version_check 的回報內容，這裡的版本只影響 Windows
          檔案總管「內容」分頁看到的版本資訊，兩者現階段沒有共用同一個
          版本追蹤機制（見 zh-cn-to-tw-windows README「已知限制」）。 -->
-    <Version>1.4.0.0</Version>
-    <FileVersion>1.4.0.0</FileVersion>
-    <AssemblyVersion>1.4.0.0</AssemblyVersion>
+    <Version>1.5.0.0</Version>
+    <FileVersion>1.5.0.0</FileVersion>
+    <AssemblyVersion>1.5.0.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
