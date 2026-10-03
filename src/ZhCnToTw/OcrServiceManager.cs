@@ -176,7 +176,7 @@ internal sealed class OcrServiceManager
         }
         else
         {
-            LastError = $"本機 OCR 服務啟動逾時，已重試 {MaxStartupAttempts} 次仍失敗，請按重新整理再試一次";
+            LastError = $"本機 OCR 服務啟動逾時，已重試 {MaxStartupAttempts} 次仍失敗，請再按一次「上傳並開始繁化」重試";
             StateChanged?.Invoke();
         }
     }
@@ -198,12 +198,9 @@ internal sealed class OcrServiceManager
             _process = null;
             Port = null;
         }
-        Start();
-    }
-
-    /// <summary>讓使用者可以手動重新觸發啟動流程，不受 MaxStartupAttempts 已經用完的限制。</summary>
-    public void RetryStart()
-    {
+        // 這裡唯一的呼叫者是網頁按下「上傳並開始繁化」，每次都是使用者主動
+        // 發起的新嘗試，重試計數要從頭算；不歸零的話，前幾次失敗用完
+        // MaxStartupAttempts 之後，之後每次重按都只剩一次機會、不會再自動重試。
         _startupAttempt = 0;
         LastError = null;
         Start();
