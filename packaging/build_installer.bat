@@ -28,6 +28,11 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "WINDOWS_REPO=%%~fI"
 for %%I in ("%WINDOWS_REPO%\..") do set "META_REPO=%%~fI"
 set "WEB_REPO=%META_REPO%\zh-cn-to-tw-web"
+rem WEB_REPO_OVERRIDE packages a different frontend folder instead, e.g. a
+rem git worktree holding a branch not merged into zh-cn-to-tw-web's main
+rem yet, so it can be tried in a real installer first. Step 2 echoes the
+rem folder actually used, so a leftover override shows up in the output.
+if defined WEB_REPO_OVERRIDE for %%I in ("%WEB_REPO_OVERRIDE%") do set "WEB_REPO=%%~fI"
 set "OCR_REPO=%META_REPO%\zh-cn-to-tw-ocr-service"
 set "STAGING=%SCRIPT_DIR%staging"
 set "STAGING_APP=%STAGING%\app"
@@ -53,7 +58,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo ==^> [2/4] Copying zh-cn-to-tw-web frontend into web\
+echo ==^> [2/4] Copying the frontend from %WEB_REPO% into web\
 if not exist "%WEB_REPO%\index.html" (
     echo Cannot find %WEB_REPO%\index.html - is zh-cn-to-tw-web checked out correctly?
     exit /b 1

@@ -15,9 +15,9 @@
 
 ### 這是什麼
 
-WPF（.NET 8）+ WebView2 的桌面殼，用固定的 `file://` 路徑載入 `zh-cn-to-tw-web` 的 `index.html`，理由跟 Mac 版完全一樣：本機 HTTP server 的 port 每次啟動不固定，會讓 `localStorage`（登入 session）的 origin 跟著變，等於每次開 App 都要重新登入；`file://` 的路徑固定，origin 穩定，登入狀態才留得住。
+WPF（.NET 8）+ WebView2 的桌面殼，用 WebView2 的虛擬主機對應，把 `zh-cn-to-tw-web` 的資料夾對應到固定網址 `https://zh-cn-to-tw.example/` 再載入 `index.html`。來源一定要固定：`localStorage`（登入 session）是照來源分開存的，來源一變就等於每次開 App 都要重新登入。1.x 用的是固定的 `file://` 路徑，2.0 起換成虛擬主機，原因是 `file://` 不能用 ES module——見「網頁怎麼載入：2.0 起從 file:// 換成虛擬主機」。
 
-已經上線：用 Inno Setup 打包成單一安裝檔 `ZhCnToTw-Setup-<版本>.exe`，掛在這支 repo 的 GitHub Releases（tag 是 `v<版本>`），下載頁 `https://beethoreven.github.io/zh-cn-to-tw-web/` 直接連到安裝檔本身。功能跟 Mac 11+ 版對等：桌面版 Google 登入、Stage 1（本機 OCR + LLM 潤飾）、Stage 2（LLM 校對）、系統睡眠保護、下載結果。
+已經上線：用 Inno Setup 打包成單一安裝檔 `ZhCnToTw-Setup-<版本>.exe`，掛在這支 repo 的 GitHub Releases（tag 是 `v<版本>`），下載頁 `https://beethoreven.github.io/zh-cn-to-tw-web/` 直接連到安裝檔本身。功能跟 Mac 11+ 版對等：桌面版 Google 登入、Stage 1（本機 OCR + LLM 潤飾）、Stage 2（套用範本修改，2.0 新增）、Stage 3（LLM 校對，1.x 叫 Stage 2）、系統睡眠保護、下載結果。
 
 支援範圍是 **Windows 10（1607 以上）／Windows 11，64 位元**，單一 build 涵蓋全部，不像 Mac 版拆成兩包。不支援 Windows 7，也沒有 32 位元或 ARM64 版——見「支援範圍為什麼是 Win10 1607 以上、64 位元」。
 
@@ -29,7 +29,7 @@ WPF（.NET 8）+ WebView2 的桌面殼，用固定的 `file://` 路徑載入 `zh
 zh-cn-to-tw/                       (meta-repo，本身不部署)
 ├── build_app_exe.bat              (打包入口：清 bin/obj 後呼叫下面的 build_installer.bat)
 ├── zh-cn-to-tw-backend/           (Flask API，部署在 Render)
-├── zh-cn-to-tw-web/               (前端，本殼用 file:// 內嵌它)
+├── zh-cn-to-tw-web/               (前端，本殼用虛擬主機 https://zh-cn-to-tw.example 內嵌它)
 ├── zh-cn-to-tw-mac/               (macOS 桌面殼)
 ├── zh-cn-to-tw-ocr-service/       (本機 OCR，PyInstaller 打包後內嵌進本殼)
 └── zh-cn-to-tw-windows/           (這支 repo)
@@ -47,13 +47,29 @@ zh-cn-to-tw/                       (meta-repo，本身不部署)
     └── zh-cn-to-tw-ocr-service.exe
 ```
 
-本機開發時（`dotnet run`，還沒跑過打包腳本），執行檔旁邊沒有 `web\`，殼會從執行檔位置往上找，直到找到 sibling 的 `zh-cn-to-tw-web/index.html`——這個退路假設這支 repo 是在 `zh-cn-to-tw` meta-repo 底下、跟 `zh-cn-to-tw-web` 同層被 clone 下來的。OCR 服務沒有對應的自動退路，開發時要用環境變數指定（見架設 SOP Part C）。
+本機開發時（`dotnet run`，還沒跑過打包腳本），執行檔旁邊沒有 `web\`，殼會從執行檔位置往上找，直到找到 sibling 的 `zh-cn-to-tw-web/index.html`，再把那個資料夾對應到同一個虛擬主機——這個退路假設這支 repo 是在 `zh-cn-to-tw` meta-repo 底下、跟 `zh-cn-to-tw-web` 同層被 clone 下來的。OCR 服務沒有對應的自動退路，開發時要用環境變數指定（見架設 SOP Part C）。
 
 ### 為什麼選 WebView2，不是別的方案
 
 Windows 沒有直接對應 macOS WKWebView 的原生框架。WebView2 是微軟官方方案，跟 WKWebView 概念最接近（都是「殼掌控生命週期、內容跑在 Chromium/WebKit 的內嵌引擎」），而且多數 Windows 10/11 機器已經內建或透過 Windows Update 裝好 Runtime，不像 Electron 那樣得整包 Chromium+Node.js 一起發（動輒 100MB+），也不像 Tauri 那樣需要額外的 Rust 技術棧。
 
 目前**沒有**做 WebView2 Runtime 的偵測或自動安裝：機器上沒有 Runtime 時，`InitializeWebViewAsync` 的 `try/catch` 會攔下初始化失敗，跳出「無法啟動內嵌瀏覽器元件（WebView2）」的訊息框後關閉 App。這層 `try/catch` 是刻意加的——它掛在 `Loaded` 的 async void lambda 底下，沒攔的話會變成未處理例外，使用者只會看到視窗憑空消失。
+
+### 網頁怎麼載入：2.0 起從 file:// 換成虛擬主機
+
+1.x 用固定的 `file://` 路徑載入 `zh-cn-to-tw-web` 的 `index.html`。2.0 起改用 WebView2 的虛擬主機對應（`SetVirtualHostNameToFolderMapping`）：把網頁資料夾對應到 `https://zh-cn-to-tw.example/`，頁面從這個網址載入。
+
+**為什麼要換**：`file://` 頁面在瀏覽器眼中沒有來源（`Origin` 是字面上的 `"null"`），ES module 的 `import` 一律被 CORS 擋下；前端 2.0 要拆成多個模組檔案，這條路走不通。同一個限制也讓網頁在執行期沒辦法用 `fetch` 讀同一份安裝裡的其他檔案（TA notice 當初就是因此搬到後端，見 `zh-cn-to-tw-web` README）。
+
+**當初為什麼選 `file://`，換掉之後那個問題會不會回來**：更早之前桌面版用本機 HTTP 伺服器供應網頁，port 每次啟動都不一樣，而 `localStorage` 是照 scheme+host+port 分開存的，等於每次開 App 都是新的來源，登入狀態救不回來。`file://` 的路徑固定，來源才穩定。虛擬主機一樣是固定來源（沒有 port，名稱寫死在 `MainWindow.xaml.cs` 的 `WebVirtualHost`），所以這個問題不會回來。代價只有一次：從 1.x 升級時，舊來源存的登入狀態讀不到，要重新登入一次（`localStorage` 裡只存了登入 session，沒有其他資料會跟著消失）。
+
+**網域選擇**：`.example` 是 RFC 6761 保留給範例用的頂級網域，保證不會有真實網站；刻意不用 `.local`，WebView2 文件註明它會讓導覽變慢。改這個名稱等於換來源：所有人的登入狀態都會失效，`zh-cn-to-tw-backend` 和 `zh-cn-to-tw-ocr-service` 的 CORS 允許清單也要跟著改。
+
+**存取權限用 `Deny`**：只有這個來源自己的頁面能讀這個資料夾，其他網站一律不行。頁面自己的 script、style、module 都是同源請求，不受影響（WebView2 文件建議：用不到跨來源存取就用 `Deny`）。
+
+**每次啟動先清 HTTP 磁碟快取**：`file://` 載入的檔案不會進 HTTP 快取，換成 https 之後就會。App 更新、`web\` 換成新檔案之後，WebView2 可能還拿快取裡的舊 `script.js` 出來用，畫面跑的是舊版程式而且看不出來（Mac 版以前載入線上網址時實際撞過同一件事）。所以殼在載入網頁之前呼叫 `Profile.ClearBrowsingDataAsync(DiskCache)`。只清磁碟快取，`localStorage` 是另一種資料，不受影響；清除失敗也不擋啟動。
+
+**實測驗證**（2026-10-15，用 `--remote-debugging-port` 連進測試版殼的頁面逐項檢查）：頁面來源是 `https://zh-cn-to-tw.example`、`isSecureContext` 為 true、webkit 橋接 shim 正常；同源 `fetch('./script.js')` 回 200、`Content-Type: text/javascript`；動態 `import()` 一個 ES module 成功；從這個 https 頁面打本機 OCR 服務的 `http://127.0.0.1:<port>/health` 回 200，沒有被混合內容或本機網路限制擋下；`localStorage` 可以正常讀寫。另外實測了跨次啟動：第一次啟動寫進 `localStorage` 的值，正常關閉再開之後還在（也證明啟動時清磁碟快取不會清到它）；兩次啟動之間把網頁資料夾裡的檔案換成新內容，第二次啟動拿到的是新內容；開發模式的退路（對應 sibling 的 `zh-cn-to-tw-web` 資料夾）一樣是這個來源、一樣正常載入。
 
 ### 支援範圍為什麼是 Win10 1607 以上、64 位元
 
@@ -63,7 +79,7 @@ Windows 沒有直接對應 macOS WKWebView 的原生框架。WebView2 是微軟�
 
 ### zh-cn-to-tw-web 是為 WKWebView 寫的，這支殼怎麼跟它溝通
 
-`zh-cn-to-tw-web` 的 `script.js`（Mac/Windows 共用的同一份前端）裡，桌面版登入、本機 OCR 控制、系統睡眠保護這幾個功能，直接呼叫 `window.webkit.messageHandlers.<name>.postMessage(...)`——這是 Safari/WebKit 專有的橋接 API，Chromium 為底的 WebView2 沒有這個全域物件，原樣執行會直接拋 `ReferenceError`。
+`zh-cn-to-tw-web` 的 `script.js`（Mac/Windows 共用的同一份前端；2.0 起拆成 `js/` 底下的多個模組，跟殼溝通的部分集中在 `js/core/bridge.js`，下文提到 `script.js` 的地方指的都是這份共用前端）裡，桌面版登入、本機 OCR 控制、系統睡眠保護這幾個功能，直接呼叫 `window.webkit.messageHandlers.<name>.postMessage(...)`——這是 Safari/WebKit 專有的橋接 API，Chromium 為底的 WebView2 沒有這個全域物件，原樣執行會直接拋 `ReferenceError`。
 
 刻意不修改 `zh-cn-to-tw-web`（那是 Mac/Windows 共用的前端，改了兩邊都要重新驗證，風險比較高）。改成在這支殼裡用 `CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync` 注入一段 shim，在頁面載入前就把 `window.webkit.messageHandlers` 這個物件補上，內部把同樣的呼叫轉送到 WebView2 原生的 `window.chrome.webview.postMessage`；殼這邊再用 `CoreWebView2.WebMessageReceived` 依訊息裡的 `channel` 欄位分派到對應的 C# 處理函式（`MainWindow.xaml.cs` 的 `OnWebMessageReceived`）。網頁那邊完全不用知道自己現在是跑在哪一種殼上面。
 
@@ -145,7 +161,7 @@ meta-repo 的 `update_version` skill 只處理 Mac 版的 `Info.plist` 跟後端
 
 ### 下載存到桌面
 
-Stage 1/2 的「下載結果」走 `fetch` + blob + `<a download>` 這條標準路徑，WebView2 原生就認得。`DownloadStarting` 事件把存檔目錄從系統「下載」資料夾換成桌面，檔名用 `UniqueDestination` 加 ` (1)`、` (2)` 後綴避免覆蓋使用者前一次下載的同名檔案。`legacyDownload` channel 也有實作（同樣寫到桌面），但 `script.js` 只有在 `osTier === "10.15"` 才會走那條路，Windows 上實際不會被觸發，只是備援。
+各 Stage 的「下載結果」走 `fetch` + blob + `<a download>` 這條標準路徑，WebView2 原生就認得。`DownloadStarting` 事件把存檔目錄從系統「下載」資料夾換成桌面，檔名用 `UniqueDestination` 加 ` (1)`、` (2)` 後綴避免覆蓋使用者前一次下載的同名檔案。`legacyDownload` channel 也有實作（同樣寫到桌面），但 `script.js` 只有在 `osTier === "10.15"` 才會走那條路，Windows 上實際不會被觸發，只是備援。
 
 ### 檔案結構
 
@@ -153,9 +169,10 @@ Stage 1/2 的「下載結果」走 `fetch` + blob + `<a download>` 這條標準�
 src/ZhCnToTw/
 ├── ZhCnToTw.csproj             # 專案檔；版本號（三處之一）
 ├── App.xaml(.cs)               # 進入點
-├── MainWindow.xaml(.cs)        # 主視窗、WebView2 初始化、webkit-bridge shim
-│                               # 注入與分派、桌面版網址參數（含 appMajor/
-│                               # appMinor）、睡眠保護、下載改存桌面、重新整理鍵
+├── MainWindow.xaml(.cs)        # 主視窗、WebView2 初始化、虛擬主機對應與清磁碟
+│                               # 快取、webkit-bridge shim 注入與分派、桌面版網址
+│                               # 參數（含 appMajor/appMinor）、睡眠保護、下載改存
+│                               # 桌面、重新整理鍵
 ├── GoogleDesktopSignIn.cs      # 桌面版 Google 登入（loopback + 系統瀏覽器）
 ├── OcrServiceManager.cs        # 本機 OCR 子行程生命週期、port/token、逾時重試
 └── ProcessJobObject.cs         # Job Object：殼結束時連坐砍掉 OCR 子行程
@@ -175,6 +192,8 @@ packaging/
 - **解除安裝不會清使用者資料**：`%LocalAppData%\ZhCnToTw\`（WebView2 profile、登入 session、`oauth_debug.log`）不在安裝目錄底下，解除安裝後會留著。這是刻意保守的——使用者可能只是重灌想保留登入狀態；Mac 版有詢問要不要一併清掉的 UI，Windows 這邊還沒有。
 - **WebView2 render process 掛掉時沒有完整復原 UI**：Mac 版對 WKWebView 背景 process 被系統砍掉有專門處理（整個換成原生提示畫面）。這裡只監聽 `CoreWebView2.ProcessFailed` 印 log，還沒實測過是否需要 Mac 版那種複雜度的復原 UI。
 - **安裝檔沒有程式碼簽章**。
+- **從 1.x 升級到 2.0 要重新登入一次**：網頁來源從 `file://` 換成 `https://zh-cn-to-tw.example`，舊來源存的登入狀態讀不到。只會發生這一次，之後的版本來源不變。
+- **Chromium 的 Local Network Access（LNA）是未來的風險**：LNA 會限制網頁連到 `127.0.0.1`，本機 OCR 服務正好在那裡。WebView2 目前整個關掉 LNA（2026-10-15 實測從虛擬主機頁面打本機 OCR 服務正常），微軟預告之後會在 `CoreWebView2PermissionKind` 加新值，讓殼自己決定放不放行。哪天真的啟用了，要在 `MainWindow.xaml.cs` 替 `https://zh-cn-to-tw.example` 開權限。
 
 ---
 
@@ -209,7 +228,7 @@ dotnet run
 
 第一次執行 WebView2 會在 `%LocalAppData%\ZhCnToTw\WebView2` 建立自己的使用者資料夾（存 cookie、localStorage、登入 session），跟執行檔本身分開放。
 
-這樣跑起來，登入與 Stage 2 可以直接用。**Stage 1 需要本機 OCR 服務**，而 `dotnet run` 的輸出目錄旁邊沒有 `ocr-service\`，要先設下面其中一個環境變數再執行，否則按「上傳並開始繁化」會顯示找不到 ocr-service 執行檔的錯誤。最快的做法是直接用 ocr-service 的 venv（需要先照 Part A 步驟 2 建好）：
+這樣跑起來，登入與 Stage 2、Stage 3 可以直接用（這兩個不需要 OCR）。**Stage 1 需要本機 OCR 服務**，而 `dotnet run` 的輸出目錄旁邊沒有 `ocr-service\`，要先設下面其中一個環境變數再執行，否則按「上傳並開始繁化」會顯示找不到 ocr-service 執行檔的錯誤。最快的做法是直接用 ocr-service 的 venv（需要先照 Part A 步驟 2 建好）：
 
 ```powershell
 $env:OCR_SERVICE_DEV_PYTHON_DIR = "I:\Codebase\zh-cn-to-tw\zh-cn-to-tw-ocr-service"
@@ -222,10 +241,11 @@ dotnet run
 
 | 變數 | 必填 | 說明 |
 |---|---|---|
-| `WEB_BASE_URL_OVERRIDE` | 否 | 指到本機另外跑的網頁伺服器（例如 `python -m http.server`），測試還沒進 sibling 目錄的前端改動。設定後殼會直接載入這個網址，不會走 `file://`。 |
+| `WEB_BASE_URL_OVERRIDE` | 否 | 指到本機另外跑的網頁伺服器（例如 `python -m http.server`），測試還沒進 sibling 目錄的前端改動。設定後殼會直接載入這個網址，不會走虛擬主機對應。 |
 | `WEB_API_BASE_OVERRIDE` | 否 | 指到本機另外跑的 backend（例如 `http://127.0.0.1:5001`），測試還沒部署上去的後端改動。省略時預設打正式的 `https://zh-cn-to-tw-backend.onrender.com`。 |
 | `OCR_SERVICE_DEV_PATH` | 否 | 指到本機已經用 PyInstaller 打包好的 `zh-cn-to-tw-ocr-service.exe`。只有在執行檔旁邊沒有 `ocr-service\` 時才會被用到。 |
 | `OCR_SERVICE_DEV_PYTHON_DIR` | 否 | 指到 `zh-cn-to-tw-ocr-service` repo 根目錄，殼會直接用它的 `venv\Scripts\python.exe app.py` 啟動服務，不需要每次改動都重新跑 PyInstaller。優先順序排在 `OCR_SERVICE_DEV_PATH` 之後。 |
+| `WEB_REPO_OVERRIDE` | 否 | 只有打包腳本會讀（App 本身不看）：把另一個資料夾的前端包進安裝檔，取代旁邊的 `zh-cn-to-tw-web`。用來在合併進 `main` 之前先用真的安裝檔測試還在別的分支（例如 git worktree）上的前端。用法見 Part D。 |
 
 ## Part D. 打包成安裝檔
 
@@ -239,10 +259,19 @@ build_app_exe.bat
 
 如果第 3 步連續三次失敗並提示防毒軟體，把 `zh-cn-to-tw-ocr-service` 資料夾加進防毒軟體即時掃描的排除清單後重跑。
 
+要包進還沒合併進 `zh-cn-to-tw-web` `main` 的前端（例如 2.0 前端目前在 meta-repo 的 `.web-v2` worktree），先在同一個命令提示字元視窗設 `WEB_REPO_OVERRIDE` 再執行：
+
+```bat
+set WEB_REPO_OVERRIDE=I:\Codebase\zh-cn-to-tw\.web-v2
+build_app_exe.bat
+```
+
+第 2 步的輸出會印出實際複製的是哪個資料夾，確認一下沒有包錯。測完要打正式版之前，記得關掉這個視窗或執行 `set WEB_REPO_OVERRIDE=` 清掉它。
+
 ## Part E. 出新版
 
 1. 把版本號改成新的，三個地方要一致（見專案報告「版本號」一節）：`src/ZhCnToTw/ZhCnToTw.csproj`、`packaging/installer.iss`、`src/ZhCnToTw/MainWindow.xaml.cs` 的 `appMajor`/`appMinor`。
-2. 照 Part D 打包，實際安裝起來測過登入、Stage 1、Stage 2。
+2. 照 Part D 打包，實際安裝起來測過登入與 Stage 1、2、3。
 3. commit、push，然後建立 Release 並上傳安裝檔（tag 是 `v<版本>`，檔名維持 ASCII）：
 
 ```bash
@@ -271,9 +300,9 @@ The two parts are intentionally separate; the report is background knowledge, th
 
 ### What This Is
 
-A WPF (.NET 8) + WebView2 desktop shell that loads `zh-cn-to-tw-web`'s `index.html` via a fixed `file://` path, for exactly the same reason as the Mac build: a local HTTP server's port changes on every launch, which changes `localStorage`'s (login session) origin every time — meaning the user would have to log in again on every app start. A fixed `file://` path keeps the origin stable, so the login session survives restarts.
+A WPF (.NET 8) + WebView2 desktop shell that uses WebView2's virtual host mapping to map `zh-cn-to-tw-web`'s folder to the fixed URL `https://zh-cn-to-tw.example/` and loads `index.html` from there. The origin must stay fixed: `localStorage` (the login session) is partitioned by origin, so a changing origin would mean logging in again on every app start. 1.x used a fixed `file://` path; 2.0 switched to the virtual host because `file://` cannot use ES modules — see "How the page is loaded: from file:// to a virtual host in 2.0".
 
-It is live: packaged with Inno Setup into a single installer, `ZhCnToTw-Setup-<version>.exe`, attached to this repo's GitHub Releases (tagged `v<version>`), and the download page at `https://beethoreven.github.io/zh-cn-to-tw-web/` links straight to the installer file. It is at feature parity with the Mac 11+ build: desktop Google sign-in, Stage 1 (local OCR + LLM refinement), Stage 2 (LLM proofreading), the system-sleep guard, and result downloads.
+It is live: packaged with Inno Setup into a single installer, `ZhCnToTw-Setup-<version>.exe`, attached to this repo's GitHub Releases (tagged `v<version>`), and the download page at `https://beethoreven.github.io/zh-cn-to-tw-web/` links straight to the installer file. It is at feature parity with the Mac 11+ build: desktop Google sign-in, Stage 1 (local OCR + LLM refinement), Stage 2 (apply template, new in 2.0), Stage 3 (LLM proofreading, called Stage 2 in 1.x), the system-sleep guard, and result downloads.
 
 Supported range is **Windows 10 (1607 or later) / Windows 11, 64-bit**, covered by a single build rather than split into two packages like the Mac side. Windows 7 is not supported, and there is no 32-bit or ARM64 build — see "Why the supported range is Windows 10 1607+, 64-bit".
 
@@ -285,7 +314,7 @@ This repo is a submodule under the `zh-cn-to-tw` meta-repo, sibling to `zh-cn-to
 zh-cn-to-tw/                       (meta-repo, not deployed itself)
 ├── build_app_exe.bat              (packaging entry point: cleans bin/obj, then calls build_installer.bat below)
 ├── zh-cn-to-tw-backend/           (Flask API, deployed on Render)
-├── zh-cn-to-tw-web/               (frontend, embedded via file:// here)
+├── zh-cn-to-tw-web/               (frontend, embedded here via the virtual host https://zh-cn-to-tw.example)
 ├── zh-cn-to-tw-mac/               (macOS desktop shell)
 ├── zh-cn-to-tw-ocr-service/       (local OCR, PyInstaller-packaged and embedded in this shell)
 └── zh-cn-to-tw-windows/           (this repo)
@@ -303,13 +332,29 @@ The installed layout looks like this, and it is exactly the structure the shell 
     └── zh-cn-to-tw-ocr-service.exe
 ```
 
-During local development (`dotnet run`, before any packaging script has run) there is no `web\` next to the executable, so the shell walks up from the executable's location until it finds a sibling `zh-cn-to-tw-web/index.html` — this fallback assumes the repo is checked out under the `zh-cn-to-tw` meta-repo, at the same level as `zh-cn-to-tw-web`. The OCR service has no equivalent automatic fallback; in development it must be pointed to with an environment variable (see Setup Guide, Part C).
+During local development (`dotnet run`, before any packaging script has run) there is no `web\` next to the executable, so the shell walks up from the executable's location until it finds a sibling `zh-cn-to-tw-web/index.html`, then maps that folder to the same virtual host — this fallback assumes the repo is checked out under the `zh-cn-to-tw` meta-repo, at the same level as `zh-cn-to-tw-web`. The OCR service has no equivalent automatic fallback; in development it must be pointed to with an environment variable (see Setup Guide, Part C).
 
 ### Why WebView2, and not something else
 
 Windows has no framework that directly corresponds to macOS's WKWebView. WebView2 is Microsoft's official answer — conceptually closest to WKWebView (a shell that owns the lifecycle, content runs inside an embedded Chromium/WebKit engine) — and most Windows 10/11 machines already have the Runtime preinstalled or delivered via Windows Update, unlike Electron (which ships an entire Chromium+Node.js bundle, often 100MB+) or Tauri (which pulls in a separate Rust toolchain).
 
 There is currently **no** WebView2 Runtime detection or automatic installation: on a machine without the Runtime, the `try/catch` in `InitializeWebViewAsync` catches the initialization failure, shows a "cannot start the embedded browser component (WebView2)" message box, and closes the app. That `try/catch` is deliberate — the code runs under an async void lambda on `Loaded`, so without it the failure would become an unhandled exception and the user would just see the window vanish.
+
+### How the page is loaded: from file:// to a virtual host in 2.0
+
+1.x loaded `zh-cn-to-tw-web`'s `index.html` from a fixed `file://` path. From 2.0 the shell uses WebView2's virtual host mapping (`SetVirtualHostNameToFolderMapping`) instead: the web folder is mapped to `https://zh-cn-to-tw.example/`, and the page is loaded from that URL.
+
+**Why switch**: to the browser, a `file://` page has no origin (its `Origin` is the literal string `"null"`), so every ES module `import` is blocked by CORS; the 2.0 frontend is being split into multiple module files, which that path cannot support. The same restriction is why the page cannot `fetch` other files from its own installation at runtime (the TA notice was moved to the backend for exactly this reason; see the `zh-cn-to-tw-web` README).
+
+**Why `file://` was chosen in the first place, and whether that problem comes back**: before that, the desktop build served the page from a local HTTP server whose port changed on every launch, and `localStorage` is partitioned by scheme+host+port, so every launch was a new origin and the login session could never be recovered. A fixed `file://` path gave a stable origin. A virtual host is just as fixed (no port, and the name is hard-coded as `WebVirtualHost` in `MainWindow.xaml.cs`), so that problem does not come back. The only cost is a one-time one: when upgrading from 1.x, the session stored under the old origin cannot be read, so the user logs in once more (`localStorage` holds only the login session, so nothing else is lost).
+
+**Choice of domain**: `.example` is a top-level domain reserved by RFC 6761 for examples and is guaranteed never to belong to a real site; `.local` is deliberately avoided because the WebView2 docs note it slows down navigation. Changing this name means changing the origin: everyone's login session is invalidated, and the CORS allowlists in `zh-cn-to-tw-backend` and `zh-cn-to-tw-ocr-service` must change with it.
+
+**Access kind `Deny`**: only pages from this origin itself can read the folder; every other site is refused. The page's own scripts, styles and modules are same-origin requests and are unaffected (the WebView2 docs advise using `Deny` when cross-origin access isn't needed).
+
+**The HTTP disk cache is cleared on every launch**: files loaded via `file://` never enter the HTTP cache, but over https they can. After an app update replaces the files in `web\`, WebView2 could still serve an old `script.js` from cache, so the screen would run old code with no visible sign (the Mac build hit exactly this when it used to load an online URL). The shell therefore calls `Profile.ClearBrowsingDataAsync(DiskCache)` before loading the page. Only the disk cache is cleared — `localStorage` is a different kind of data and is untouched — and a failure to clear does not block startup.
+
+**Verified in practice** (2026-10-15, by connecting to the test build's page through `--remote-debugging-port` and checking each item): the page's origin is `https://zh-cn-to-tw.example`, `isSecureContext` is true and the webkit bridge shim works; a same-origin `fetch('./script.js')` returns 200 with `Content-Type: text/javascript`; a dynamic `import()` of an ES module succeeds; calling the local OCR service at `http://127.0.0.1:<port>/health` from this https page returns 200, not blocked as mixed content or by local-network restrictions; and `localStorage` reads and writes normally. Behavior across restarts was also tested: a value written to `localStorage` in one launch was still there after closing normally and reopening (which also shows that clearing the disk cache at startup does not touch it); replacing a file in the web folder between two launches meant the second launch got the new content; and the development fallback (mapping the sibling `zh-cn-to-tw-web` folder) uses the same origin and loads normally too.
 
 ### Why the supported range is Windows 10 1607+, 64-bit
 
@@ -319,7 +364,7 @@ There is currently **no** WebView2 Runtime detection or automatic installation: 
 
 ### zh-cn-to-tw-web was written for WKWebView — how does this shell talk to it
 
-`zh-cn-to-tw-web`'s `script.js` (the same frontend shared by both the Mac and Windows builds) calls `window.webkit.messageHandlers.<name>.postMessage(...)` directly for desktop sign-in, local OCR control, and the system-sleep guard — this is a Safari/WebKit-only bridge API that Chromium-based WebView2 does not have; calling it as-is throws a `ReferenceError`.
+`zh-cn-to-tw-web`'s `script.js` (the same frontend shared by both the Mac and Windows builds; from 2.0 on it is split into several modules under `js/`, with everything that talks to the shell gathered in `js/core/bridge.js` — wherever `script.js` is mentioned below, it means this shared frontend) calls `window.webkit.messageHandlers.<name>.postMessage(...)` directly for desktop sign-in, local OCR control, and the system-sleep guard — this is a Safari/WebKit-only bridge API that Chromium-based WebView2 does not have; calling it as-is throws a `ReferenceError`.
 
 `zh-cn-to-tw-web` was deliberately left unmodified (it's the frontend shared by both platforms; changing it means re-validating both). Instead, this shell injects a shim via `CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync` that defines `window.webkit.messageHandlers` before the page's own scripts run, forwarding the same calls to WebView2's native `window.chrome.webview.postMessage`; the shell then dispatches on `CoreWebView2.WebMessageReceived` based on a `channel` field to the matching C# handler (`OnWebMessageReceived` in `MainWindow.xaml.cs`). The web page never needs to know which shell it's running inside.
 
@@ -401,7 +446,7 @@ A few deliberate decisions and pitfalls:
 
 ### Downloads go to the Desktop
 
-The Stage 1/2 "download result" buttons use the standard `fetch` + blob + `<a download>` path, which WebView2 handles natively. The `DownloadStarting` event redirects the save directory from the system "Downloads" folder to the Desktop, with `UniqueDestination` adding ` (1)`, ` (2)` suffixes so a previous download of the same name isn't overwritten. The `legacyDownload` channel is implemented too (also writing to the Desktop), but `script.js` only takes that path when `osTier === "10.15"`, so it is never actually triggered on Windows and exists only as a fallback.
+Every Stage's "download result" buttons use the standard `fetch` + blob + `<a download>` path, which WebView2 handles natively. The `DownloadStarting` event redirects the save directory from the system "Downloads" folder to the Desktop, with `UniqueDestination` adding ` (1)`, ` (2)` suffixes so a previous download of the same name isn't overwritten. The `legacyDownload` channel is implemented too (also writing to the Desktop), but `script.js` only takes that path when `osTier === "10.15"`, so it is never actually triggered on Windows and exists only as a fallback.
 
 ### File Structure
 
@@ -409,10 +454,11 @@ The Stage 1/2 "download result" buttons use the standard `fetch` + blob + `<a do
 src/ZhCnToTw/
 ├── ZhCnToTw.csproj             # Project file; version number (one of three places)
 ├── App.xaml(.cs)               # Entry point
-├── MainWindow.xaml(.cs)        # Main window, WebView2 init, webkit-bridge shim
-│                               # injection/dispatch, desktop URL parameters (incl.
-│                               # appMajor/appMinor), sleep guard, downloads to
-│                               # Desktop, reload button
+├── MainWindow.xaml(.cs)        # Main window, WebView2 init, virtual host mapping and
+│                               # disk-cache clearing, webkit-bridge shim injection/
+│                               # dispatch, desktop URL parameters (incl. appMajor/
+│                               # appMinor), sleep guard, downloads to Desktop,
+│                               # reload button
 ├── GoogleDesktopSignIn.cs      # Desktop Google sign-in (loopback + system browser)
 ├── OcrServiceManager.cs        # Local OCR subprocess lifecycle, port/token, timeout retry
 └── ProcessJobObject.cs         # Job Object: kills the OCR subprocess when the shell exits
@@ -432,6 +478,8 @@ packaging/
 - **Uninstalling does not remove user data**: `%LocalAppData%\ZhCnToTw\` (WebView2 profile, login session, `oauth_debug.log`) is outside the install directory and is left behind after uninstalling. This is deliberately conservative — the user may just be reinstalling and want to keep their login; the Mac build has UI asking whether to clear it as well, which Windows doesn't have yet.
 - **No full recovery UI for a crashed WebView2 render process**: the Mac build has dedicated handling for WKWebView's background process being killed by the system (swapping in a native placeholder screen). Here only `CoreWebView2.ProcessFailed` is logged, and it hasn't been tested in practice whether the Mac build's level of recovery-UI complexity is needed.
 - **The installer is not code-signed.**
+- **Upgrading from 1.x to 2.0 requires logging in once more**: the page's origin changed from `file://` to `https://zh-cn-to-tw.example`, so the session stored under the old origin cannot be read. This happens only this once; later versions keep the same origin.
+- **Chromium's Local Network Access (LNA) is a future risk**: LNA restricts web pages from reaching `127.0.0.1`, which is exactly where the local OCR service runs. WebView2 currently disables LNA entirely (calling the local OCR service from the virtual-host page was verified to work on 2026-10-15), and Microsoft has announced new `CoreWebView2PermissionKind` values that will let the shell decide whether to allow it. If it is ever enabled, `MainWindow.xaml.cs` will need to grant that permission to `https://zh-cn-to-tw.example`.
 
 ---
 
@@ -466,7 +514,7 @@ dotnet run
 
 On first run, WebView2 creates its own user data folder at `%LocalAppData%\ZhCnToTw\WebView2` (cookies, localStorage, login session), kept separate from the executable itself.
 
-Run this way, sign-in and Stage 2 work right away. **Stage 1 needs the local OCR service**, and `dotnet run`'s output directory has no `ocr-service\` next to it, so set one of the environment variables below before running; otherwise pressing "upload and start" shows an error that the ocr-service executable cannot be found. The quickest option is to use ocr-service's venv directly (create it first per Part A, step 2):
+Run this way, sign-in, Stage 2, and Stage 3 work right away (neither needs OCR). **Stage 1 needs the local OCR service**, and `dotnet run`'s output directory has no `ocr-service\` next to it, so set one of the environment variables below before running; otherwise pressing "upload and start" shows an error that the ocr-service executable cannot be found. The quickest option is to use ocr-service's venv directly (create it first per Part A, step 2):
 
 ```powershell
 $env:OCR_SERVICE_DEV_PYTHON_DIR = "I:\Codebase\zh-cn-to-tw\zh-cn-to-tw-ocr-service"
@@ -479,10 +527,11 @@ All of these are for development only; an installed release build needs none of 
 
 | Variable | Required | Description |
 |---|---|---|
-| `WEB_BASE_URL_OVERRIDE` | No | Points to a local web server (e.g. `python -m http.server`), for testing frontend changes not yet in the sibling directory. When set, the shell navigates to this URL directly instead of `file://`. |
+| `WEB_BASE_URL_OVERRIDE` | No | Points to a local web server (e.g. `python -m http.server`), for testing frontend changes not yet in the sibling directory. When set, the shell navigates to this URL directly instead of using the virtual host mapping. |
 | `WEB_API_BASE_OVERRIDE` | No | Points to a local backend (e.g. `http://127.0.0.1:5001`), for testing backend changes not yet deployed. Defaults to the production `https://zh-cn-to-tw-backend.onrender.com` when unset. |
 | `OCR_SERVICE_DEV_PATH` | No | Points to a locally PyInstaller-packaged `zh-cn-to-tw-ocr-service.exe`. Only used when there is no `ocr-service\` next to the executable. |
 | `OCR_SERVICE_DEV_PYTHON_DIR` | No | Points to the `zh-cn-to-tw-ocr-service` repo root; the shell starts the service directly with its `venv\Scripts\python.exe app.py`, so PyInstaller doesn't have to be rerun for every change. Lower priority than `OCR_SERVICE_DEV_PATH`. |
+| `WEB_REPO_OVERRIDE` | No | Read only by the packaging script (the app itself ignores it): packages the frontend from another folder instead of the sibling `zh-cn-to-tw-web`. Used to test a frontend still on another branch (e.g. a git worktree) in a real installer before it is merged into `main`. See Part D for usage. |
 
 ## Part D. Packaging an Installer
 
@@ -496,10 +545,19 @@ It cleans `bin/`, `obj/`, `packaging\staging\`, and `packaging\dist\`, then runs
 
 If step 3 fails three times in a row with the antivirus hint, add the `zh-cn-to-tw-ocr-service` folder to your antivirus's real-time scanning exclusions and rerun.
 
+To package a frontend that is not yet merged into `zh-cn-to-tw-web`'s `main` (for example, the 2.0 frontend currently lives in the meta-repo's `.web-v2` worktree), set `WEB_REPO_OVERRIDE` in the same Command Prompt window first:
+
+```bat
+set WEB_REPO_OVERRIDE=I:\Codebase\zh-cn-to-tw\.web-v2
+build_app_exe.bat
+```
+
+Step 2's output prints which folder was actually copied, so check that the right one went in. Before building a real release, close that window or run `set WEB_REPO_OVERRIDE=` to clear it.
+
 ## Part E. Shipping a New Version
 
 1. Change the version number to the new one in all three places (see "Version number" in the Project Report): `src/ZhCnToTw/ZhCnToTw.csproj`, `packaging/installer.iss`, and `appMajor`/`appMinor` in `src/ZhCnToTw/MainWindow.xaml.cs`.
-2. Package per Part D, actually install it, and test sign-in, Stage 1, and Stage 2.
+2. Package per Part D, actually install it, and test sign-in and Stages 1, 2, and 3.
 3. Commit, push, then create the Release and upload the installer (tag is `v<version>`, filename stays ASCII):
 
 ```bash

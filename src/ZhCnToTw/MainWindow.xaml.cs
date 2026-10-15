@@ -42,6 +42,14 @@ public partial class MainWindow : Window
         })();
         """;
 
+    // 網頁前端的固定來源（https://zh-cn-to-tw.example），見
+    // InitializeWebViewAsync 的說明。.example 是 RFC 6761 保留給範例用
+    // 的頂級網域，保證不會有真實網站；也刻意不用 .local（WebView2 文件
+    // 註明會讓導覽變慢）。改這個值等於換來源：localStorage 裡的登入狀態
+    // 會全部讀不到，而且 zh-cn-to-tw-backend 與 zh-cn-to-tw-ocr-service
+    // 的 CORS 允許清單都要跟著改。
+    private const string WebVirtualHost = "zh-cn-to-tw.example";
+
     // 桌面版登入用系統瀏覽器（見 GoogleDesktopSignIn 的說明），跟頁面上
     // 其他常駐狀態一樣掛在 Window 生命週期上，避免使用者按了登入之後
     // 這個物件被提早回收。
@@ -105,7 +113,20 @@ public partial class MainWindow : Window
         // 頁面（重新）載好之後，window 是全新的，之前推進去的
         // window.__OCR_PORT__ 會跟著消失——對應 Mac 版 WebView.swift 的
         // didFinish 補推邏輯，每次導覽完成都重新推一次目前最新的值。
-        core.NavigationCompleted += (_, _) => PushOcrPort();
+        //
+        // 載入失敗時一定要留 log：WebView2 導覽失敗不會拋例外，畫面只是
+        // 停在錯誤頁或空白，沒有這行就完全不知道原因（Mac 版 loadFileURL
+        // 實際吃過這個虧，見 known-issue-check 第 8 條）。2.0 改成虛擬
+        // 主機對應之後多了資料夾對應這一層可能出錯的地方，更需要它。
+        core.NavigationCompleted += (_, args) =>
+        {
+            if (!args.IsSuccess)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[webview-nav] 載入失敗：{args.WebErrorStatus}（HTTP {args.HttpStatusCode}）{core.Source}");
+            }
+            PushOcrPort();
+        };
         // 下載（Stage 1/2 的「下載結果」按鈕，走 fetch+blob+<a download>
         // 這條標準路徑，WebView2 原生就認得）預設會存到系統的「下載」
         // 資料夾，改成存到桌面——ResultFilePath 進來時已經是 WebView2
@@ -122,12 +143,55 @@ public partial class MainWindow : Window
         var (kind, target) = ResolveWebSource();
         switch (kind)
         {
-            case WebSourceKind.LocalIndexHtml:
+            case WebSourceKind.LocalFolder:
+                // 2.0 起不再用 file:// 載入，改用虛擬主機對應：把網頁資料夾
+                // 對應到固定的 https://zh-cn-to-tw.example/，頁面因此有一個
+                // 真正的來源。
+                //
+                // 為什麼要換：file:// 頁面在瀏覽器眼中沒有來源（Origin 是
+                // "null"），ES module 的 import 會被 CORS 擋下，前端沒辦法
+                // 拆成多個模組檔案；執行期間用 fetch 讀同一份安裝裡的其他
+                // 檔案也一律被擋（known-issue-check 第 10 條）。
+                //
+                // 當初選 file:// 是為了「來源固定」：更早之前用本機 HTTP
+                // 伺服器供應網頁，port 每次啟動都不一樣，localStorage 跟著
+                // 換來源，每次開 App 都要重新登入（known-issue-check 第 12
+                // 條）。虛擬主機沒有 port、名稱寫死，來源一樣固定，這個
+                // 問題不會回來。代價只有一次：從 1.x 升級上來時，舊的
+                // file:// 來源存的登入狀態讀不到，要重新登入一次。
+                //
+                // Deny：只有這個來源自己的頁面能讀這個資料夾，其他網站
+                // 一律不行。頁面自己的 script/style/module 都是同源請求，
+                // 不受影響（WebView2 文件建議「用不到跨來源存取就用 Deny」）。
+                //
+                // 已知的未來風險：Chromium 的 Local Network Access（LNA）會
+                // 限制網頁連到 127.0.0.1，本機 OCR 服務正好在那裡。WebView2
+                // 目前整個關掉 LNA，微軟預告之後會用新的 PermissionKind 讓
+                // 殼自己決定放不放行；哪天真的啟用了，要在這裡替這個來源
+                // 開權限。
+                //
+                // try/catch 跟上面初始化 WebView2 那段同一個理由：這裡在
+                // Loaded 的 async void lambda 底下，對應失敗（例如資料夾路徑
+                // 超過 MAX_PATH）沒攔的話是未處理例外，視窗會憑空消失。
+                try
+                {
+                    core.SetVirtualHostNameToFolderMapping(
+                        WebVirtualHost, target, CoreWebView2HostResourceAccessKind.Deny);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.WriteLine($"[webview-init] 虛擬主機對應失敗：{ex}");
+                    Browser.NavigateToString(
+                        "<html><body style='font-family:sans-serif;padding:2em'>"
+                        + "<h2>無法載入前端網頁</h2><p>網頁資料夾對應失敗："
+                        + System.Net.WebUtility.HtmlEncode(ex.Message)
+                        + "</p></body></html>");
+                    break;
+                }
+                await ClearDiskCacheAsync(core);
+                Browser.Source = BuildDesktopUrl($"https://{WebVirtualHost}/index.html");
+                break;
             case WebSourceKind.RemoteOverride:
-                // WebView2（Chromium）可以直接用 file:// 導覽到本機 HTML，
-                // 相對路徑引用的同目錄 script.js/style.css 會正常運作，
-                // 不需要像 WKWebView 那樣額外呼叫 allowingReadAccessTo 之類
-                // 的 API 明確授權整個目錄。
                 Browser.Source = BuildDesktopUrl(target);
                 break;
             case WebSourceKind.NotFound:
@@ -176,10 +240,35 @@ public partial class MainWindow : Window
             "desktop=1",
             $"ocrToken={Uri.EscapeDataString(_ocrServiceManager.Token)}",
             $"apiBase={Uri.EscapeDataString(apiBase)}",
-            "appMajor=1",
-            "appMinor=8",
+            "appMajor=2",
+            "appMinor=0",
             "osTier=windows");
         return new Uri($"{baseUrl}{separator}{query}");
+    }
+
+    /// <summary>
+    /// 每次啟動、載入網頁之前清掉 WebView2 的 HTTP 磁碟快取。
+    ///
+    /// file:// 載入的檔案不會進 HTTP 快取，改成 https 虛擬主機之後就會了：
+    /// App 更新、web/ 資料夾換成新版的檔案之後，WebView2 可能還拿快取裡的
+    /// 舊 script.js/style.css 出來用，畫面跑舊版程式而且看不出來（Mac 版
+    /// 以前載入線上網址時實際撞過同一件事，見 zh-cn-to-tw-mac 的
+    /// WebView.swift 的 reloadIgnoringLocalCacheData）。這個 App 的快取
+    /// 裡只有自己的網頁檔案，API 回應本來就不快取，每次清掉沒有實際成本。
+    ///
+    /// 只清磁碟快取，localStorage（登入狀態）是另一種資料，不受影響。
+    /// 清不掉也不擋啟動：最壞情況只是可能吃到舊快取，好過整個 App 打不開。
+    /// </summary>
+    private static async Task ClearDiskCacheAsync(CoreWebView2 core)
+    {
+        try
+        {
+            await core.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.DiskCache);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.WriteLine($"[webview-init] 清除磁碟快取失敗：{ex}");
+        }
     }
 
     /// <summary>
@@ -365,21 +454,23 @@ public partial class MainWindow : Window
         return candidate;
     }
 
-    private enum WebSourceKind { RemoteOverride, LocalIndexHtml, NotFound }
+    private enum WebSourceKind { RemoteOverride, LocalFolder, NotFound }
 
     /// <summary>
     /// 決定要載入哪個網頁來源，優先順序對應 Mac 版 ContentView.swift 的
     /// webURL：
     ///   1. WEB_BASE_URL_OVERRIDE 環境變數 -- 開發階段用，指到本機另外跑的
     ///      網頁伺服器（例如 python3 -m http.server），測試還沒進打包產物
-    ///      的前端改動。
+    ///      的前端改動。回傳的是網址。
     ///   2. 執行檔旁邊的 web/ 資料夾 -- Stage 3 的 build 腳本會把
     ///      zh-cn-to-tw-web 的內容複製到這裡，對應 Mac 版 .app 內的
-    ///      Contents/Resources/web/。
+    ///      Contents/Resources/web/。回傳的是資料夾路徑（要拿去做虛擬
+    ///      主機對應，不是直接導覽過去）。
     ///   3. 從執行檔位置往上找，直到某層目錄旁邊有 sibling 的
     ///      zh-cn-to-tw-web/index.html -- 純本機開發、還沒跑過打包腳本時
     ///      的退路，對應這個 meta-repo 底下 zh-cn-to-tw-windows 跟
-    ///      zh-cn-to-tw-web 互為 sibling submodule 的目錄結構。
+    ///      zh-cn-to-tw-web 互為 sibling submodule 的目錄結構。一樣回傳
+    ///      資料夾路徑。
     /// </summary>
     private static (WebSourceKind, string) ResolveWebSource()
     {
@@ -389,19 +480,19 @@ public partial class MainWindow : Window
             return (WebSourceKind.RemoteOverride, overrideUrl);
         }
 
-        var bundledIndex = Path.Combine(AppContext.BaseDirectory, "web", "index.html");
-        if (File.Exists(bundledIndex))
+        var bundledFolder = Path.Combine(AppContext.BaseDirectory, "web");
+        if (File.Exists(Path.Combine(bundledFolder, "index.html")))
         {
-            return (WebSourceKind.LocalIndexHtml, new Uri(bundledIndex).AbsoluteUri);
+            return (WebSourceKind.LocalFolder, bundledFolder);
         }
 
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null)
         {
-            var candidate = Path.Combine(dir.FullName, "zh-cn-to-tw-web", "index.html");
-            if (File.Exists(candidate))
+            var candidate = Path.Combine(dir.FullName, "zh-cn-to-tw-web");
+            if (File.Exists(Path.Combine(candidate, "index.html")))
             {
-                return (WebSourceKind.LocalIndexHtml, new Uri(candidate).AbsoluteUri);
+                return (WebSourceKind.LocalFolder, candidate);
             }
             dir = dir.Parent;
         }
