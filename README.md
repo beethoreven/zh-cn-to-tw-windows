@@ -124,7 +124,7 @@ WKWebView/WebView2 這類內嵌瀏覽器都不是「真正的瀏覽器」，Goog
 
 修法：把 `osTier` 改成資料庫裡不存在的值 `"windows"`。後端 `app.py` 的 `version_check` 本來就設計成「查無這個 os 的門檻資料時一律不擋」（`get_policy` 回 `None` 就直接回 `force_update: false`），`(os=macos, os_version=windows)` 查無資料，問題解決。`script.js` 裡以 `osTier` 分流的地方（`"10.15"` 走 Vision OCR 與 `legacyDownload`）用的都是精確字串比對，`"windows"` 不會命中，Windows 一律走 ocr-service 與標準下載路徑。
 
-這個修法的代價見下面「版本號」一節：Windows 目前完全不受強制更新政策約束。
+這個修法的代價是 Windows 從此完全不受強制更新約束，一直到 2026-10-16 才發現、修正：後端有一列 `('windows','10+')`，但沒有任何用戶端送過這組值。修正後前端（`js/core/version.js` 的 `versionCheckKey()`）讓 Windows 改送 `os=windows&os_version=default`，Mac 不變。已發布的舊前端（1.x 與第一次發布的 2.0）還是送 `os=macos&os_version=windows`，所以過渡期兩列都要維護，見下面「版本號」一節。
 
 ### 版本號：跟 Mac 版同步，但沒有共用的追蹤機制
 
@@ -138,7 +138,7 @@ Windows 版的版本號是手動維護的，寫死在三個地方，出新版時
 
 版本號刻意跟 Mac 版對齊（同一個版本號代表同一份前端功能），Mac 版出新版、Windows 版跟上對等功能時一起手動更新。Windows 版不一定每個版號都有對應的發布：1.6 是共用前端的修正（冷啟動時畫面沒鎖住），當時只有 Mac 版出了 1.6，Windows 從 1.5 直接到 1.7，1.7 的安裝檔才包進那個修正。
 
-meta-repo 的 `update_version` skill 只處理 Mac 版的 `Info.plist` 跟後端 `app_versions` 表，不會動到上面這三處。後端 `app_versions` 表目前也沒有 `(os=macos, os_version=windows)` 的資料列，所以**強制更新政策對 Windows 版不生效**——要讓它生效，需要一併處理 `script.js` 裡寫死的 `os=macos`，以及在 `app_versions` 補上 Windows 的資料列。
+meta-repo 的 `update_version` skill 只處理 Mac 版的 `Info.plist` 跟後端 `app_versions` 表，不會動到上面這三處。Windows 的強制更新門檻在後端 `app_versions` 表：新前端查 `('windows','default')`，舊前端（1.x 與第一次發布的 2.0）查 `('macos','windows')`。**要強制 Windows 更新時兩列都要改**，只改前者，停在舊前端的人不會被擋。等舊前端的人都被逼去更新之後，刪掉 `('macos','windows')` 與沒人用的 `('windows','10+')`（見 meta-repo `CLAUDE.md`「待處理事項」）。這兩列由使用者決定、直接在 DB 改。
 
 ### 打包：Inno Setup 安裝檔
 
@@ -186,7 +186,7 @@ packaging/
 
 ### 已知限制
 
-- **強制更新政策對 Windows 不生效**，版本號也沒有自動化的追蹤機制，見「版本號」一節。
+- 版本號沒有自動化的追蹤機制；強制更新門檻過渡期要同時改兩列，見「版本號」一節。
 - **沒有 WebView2 Runtime 偵測/自動安裝**：機器上沒有 Runtime 時只會跳錯誤訊息然後關閉，使用者要自己去裝。
 - **不支援 Windows 7／8.1、32 位元、ARM64**。
 - **解除安裝不會清使用者資料**：`%LocalAppData%\ZhCnToTw\`（WebView2 profile、登入 session、`oauth_debug.log`）不在安裝目錄底下，解除安裝後會留著。這是刻意保守的——使用者可能只是重灌想保留登入狀態；Mac 版有詢問要不要一併清掉的 UI，Windows 這邊還沒有。
@@ -409,7 +409,7 @@ Root cause: the backend's `GET /api/version_check` looks up the forced-update th
 
 Fix: change `osTier` to `"windows"`, a value with no row in the database. The backend's `version_check` was already designed so that "no threshold data for this os means never block" (`get_policy` returning `None` short-circuits to `force_update: false`), so `(os=macos, os_version=windows)` finds no row and the problem goes away. The places in `script.js` that branch on `osTier` (`"10.15"` taking the Vision OCR path and `legacyDownload`) all use exact string comparison, so `"windows"` never matches and Windows always takes the ocr-service and standard-download paths.
 
-The cost of this fix is covered under "Version number" below: the Windows build is currently not subject to the forced-update policy at all.
+The cost of this fix was that Windows was never subject to forced updates at all, which was only noticed and fixed on 2026-10-16: the backend had a `('windows','10+')` row, but no client had ever sent that pair. The fixed frontend (`versionCheckKey()` in `js/core/version.js`) makes Windows send `os=windows&os_version=default`; Mac is unchanged. Already-shipped old frontends (1.x and the first 2.0 build) still send `os=macos&os_version=windows`, so both rows must be maintained for a transition period; see "Version number" below.
 
 ### Version number: kept in sync with the Mac build, but with no shared tracking mechanism
 
@@ -423,7 +423,7 @@ The Windows build's version number is maintained by hand and hardcoded in three 
 
 The version number is deliberately aligned with the Mac build (the same number means the same frontend feature set) and is bumped by hand when the Mac build ships a new version and the Windows build catches up on the equivalent features. Not every version number has a Windows release: 1.6 was a fix in the shared frontend (the page not being locked on cold start), only the Mac build shipped a 1.6 at the time, and Windows went straight from 1.5 to 1.7 — the 1.7 installer is the first to include that fix.
 
-The meta-repo's `update_version` skill only handles the Mac build's `Info.plist` and the backend's `app_versions` table; it does not touch the three places above. The backend's `app_versions` table also currently has no row for `(os=macos, os_version=windows)`, so **the forced-update policy has no effect on the Windows build** — making it take effect requires also dealing with the hardcoded `os=macos` in `script.js` and adding Windows rows to `app_versions`.
+The meta-repo's `update_version` skill only handles the Mac build's `Info.plist` and the backend's `app_versions` table; it does not touch the three places above. Windows' forced-update thresholds live in the backend's `app_versions` table: the new frontend looks up `('windows','default')`, old frontends (1.x and the first 2.0 build) look up `('macos','windows')`. **To force a Windows update, change both rows** — changing only the first leaves anyone on the old frontend unblocked. Once everyone on old frontends has been forced to update, delete `('macos','windows')` and the unused `('windows','10+')` (see "待處理事項" in the meta-repo `CLAUDE.md`). The owner decides these rows and edits them directly in the DB.
 
 ### Packaging: the Inno Setup installer
 
@@ -472,7 +472,7 @@ packaging/
 
 ### Known Limitations
 
-- **The forced-update policy has no effect on Windows**, and the version number has no automated tracking; see "Version number".
+- The version number has no automated tracking, and during the transition the forced-update threshold has to be changed in two rows; see "Version number".
 - **No WebView2 Runtime detection or automatic install**: on a machine without the Runtime the app only shows an error message and closes; the user has to install it themselves.
 - **No support for Windows 7/8.1, 32-bit, or ARM64.**
 - **Uninstalling does not remove user data**: `%LocalAppData%\ZhCnToTw\` (WebView2 profile, login session, `oauth_debug.log`) is outside the install directory and is left behind after uninstalling. This is deliberately conservative — the user may just be reinstalling and want to keep their login; the Mac build has UI asking whether to clear it as well, which Windows doesn't have yet.
