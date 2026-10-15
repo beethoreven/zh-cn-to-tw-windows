@@ -259,10 +259,10 @@ build_app_exe.bat
 
 如果第 3 步連續三次失敗並提示防毒軟體，把 `zh-cn-to-tw-ocr-service` 資料夾加進防毒軟體即時掃描的排除清單後重跑。
 
-要包進還沒合併進 `zh-cn-to-tw-web` `main` 的前端（例如 2.0 前端目前在 meta-repo 的 `.web-v2` worktree），先在同一個命令提示字元視窗設 `WEB_REPO_OVERRIDE` 再執行：
+要包進還沒合併進 `zh-cn-to-tw-web` `main` 的前端（例如放在一個 git worktree 裡的分支；2.0 合併前就是這樣測的），先在同一個命令提示字元視窗設 `WEB_REPO_OVERRIDE` 再執行：
 
 ```bat
-set WEB_REPO_OVERRIDE=I:\Codebase\zh-cn-to-tw\.web-v2
+set WEB_REPO_OVERRIDE=I:\Codebase\zh-cn-to-tw\.web-feature
 build_app_exe.bat
 ```
 
@@ -545,10 +545,10 @@ It cleans `bin/`, `obj/`, `packaging\staging\`, and `packaging\dist\`, then runs
 
 If step 3 fails three times in a row with the antivirus hint, add the `zh-cn-to-tw-ocr-service` folder to your antivirus's real-time scanning exclusions and rerun.
 
-To package a frontend that is not yet merged into `zh-cn-to-tw-web`'s `main` (for example, the 2.0 frontend currently lives in the meta-repo's `.web-v2` worktree), set `WEB_REPO_OVERRIDE` in the same Command Prompt window first:
+To package a frontend that is not yet merged into `zh-cn-to-tw-web`'s `main` (for example, a branch checked out in a git worktree; that is how 2.0 was tested before it was merged), set `WEB_REPO_OVERRIDE` in the same Command Prompt window first:
 
 ```bat
-set WEB_REPO_OVERRIDE=I:\Codebase\zh-cn-to-tw\.web-v2
+set WEB_REPO_OVERRIDE=I:\Codebase\zh-cn-to-tw\.web-feature
 build_app_exe.bat
 ```
 
