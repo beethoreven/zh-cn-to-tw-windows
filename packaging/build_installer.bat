@@ -9,9 +9,9 @@ rem   3. rebuild zh-cn-to-tw-ocr-service with PyInstaller, copy it into an
 rem      ocr-service\ subfolder
 rem   4. call Inno Setup's ISCC.exe to produce a Setup.exe
 rem
-rem Every step genuinely rebuilds (never "only if missing") -- see
-rem known-issue-check item 21: a "package for distribution" script must not
-rem silently repackage stale output under a fresh-looking filename.
+rem Every step genuinely rebuilds (never "only if missing"): a "package for
+rem distribution" script must not silently repackage stale output under a
+rem fresh-looking filename.
 rem
 rem Intentionally plain ASCII, no Chinese comments -- see build_app_exe.bat
 rem at the meta-repo root for why (Windows batch files handle non-ASCII

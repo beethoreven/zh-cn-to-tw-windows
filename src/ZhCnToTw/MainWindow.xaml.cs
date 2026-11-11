@@ -116,7 +116,7 @@ public partial class MainWindow : Window
         //
         // 載入失敗時一定要留 log：WebView2 導覽失敗不會拋例外，畫面只是
         // 停在錯誤頁或空白，沒有這行就完全不知道原因（Mac 版 loadFileURL
-        // 實際吃過這個虧，見 known-issue-check 第 8 條）。2.0 改成虛擬
+        // 實際吃過這個虧：錯誤只會送到沒註冊的回呼，什麼都看不到）。2.0 改成虛擬
         // 主機對應之後多了資料夾對應這一層可能出錯的地方，更需要它。
         core.NavigationCompleted += (_, args) =>
         {
@@ -151,12 +151,12 @@ public partial class MainWindow : Window
                 // 為什麼要換：file:// 頁面在瀏覽器眼中沒有來源（Origin 是
                 // "null"），ES module 的 import 會被 CORS 擋下，前端沒辦法
                 // 拆成多個模組檔案；執行期間用 fetch 讀同一份安裝裡的其他
-                // 檔案也一律被擋（known-issue-check 第 10 條）。
+                // 檔案也一律被擋。
                 //
                 // 當初選 file:// 是為了「來源固定」：更早之前用本機 HTTP
                 // 伺服器供應網頁，port 每次啟動都不一樣，localStorage 跟著
-                // 換來源，每次開 App 都要重新登入（known-issue-check 第 12
-                // 條）。虛擬主機沒有 port、名稱寫死，來源一樣固定，這個
+                // 換來源，每次開 App 都要重新登入（localStorage 是照來源
+                // 分開存的，來源含 port）。虛擬主機沒有 port、名稱寫死，來源一樣固定，這個
                 // 問題不會回來。代價只有一次：從 1.x 升級上來時，舊的
                 // file:// 來源存的登入狀態讀不到，要重新登入一次。
                 //

@@ -138,7 +138,7 @@ Windows 版的版本號是手動維護的，寫死在三個地方，出新版時
 
 版本號刻意跟 Mac 版對齊（同一個版本號代表同一份前端功能），Mac 版出新版、Windows 版跟上對等功能時一起手動更新。Windows 版不一定每個版號都有對應的發布：1.6 是共用前端的修正（冷啟動時畫面沒鎖住），當時只有 Mac 版出了 1.6，Windows 從 1.5 直接到 1.7，1.7 的安裝檔才包進那個修正。
 
-meta-repo 的 `update_version` skill 只處理 Mac 版的 `Info.plist` 跟後端 `app_versions` 表，不會動到上面這三處。Windows 的強制更新門檻在後端 `app_versions` 表：新前端查 `('windows','default')`，舊前端（1.x 與第一次發布的 2.0）查 `('macos','windows')`。**要強制 Windows 更新時兩列都要改**，只改前者，停在舊前端的人不會被擋。等舊前端的人都被逼去更新之後，刪掉 `('macos','windows')` 與沒人用的 `('windows','10+')`（見 meta-repo `CLAUDE.md`「待處理事項」）。這兩列由使用者決定、直接在 DB 改。
+Mac 版的版本號在別的地方（`Info.plist`），兩邊沒有共用機制，出版時上面這三處要自己改。Windows 的強制更新門檻在後端 `app_versions` 表：新前端查 `('windows','default')`，舊前端（1.x 與第一次發布的 2.0）查 `('macos','windows')`。**要強制 Windows 更新時兩列都要改**，只改前者，停在舊前端的人不會被擋。等舊前端的人都被逼去更新之後，就可以刪掉 `('macos','windows')`。門檻都是直接在 DB 改。
 
 ### 打包：Inno Setup 安裝檔
 
@@ -149,7 +149,7 @@ meta-repo 的 `update_version` skill 只處理 Mac 版的 `Info.plist` 跟後端
 3. 用 `zh-cn-to-tw-ocr-service` 自己的 venv 跑 PyInstaller 重新打包，複製進 `staging\app\ocr-service\`。
 4. 呼叫 Inno Setup 的 `ISCC.exe`，把 `staging\app\` 整個封裝成 `packaging\dist\ZhCnToTw-Setup-<版本>.exe`。
 
-每一步都是真的重新 build，不沿用舊產物（對應 `known-issue-check` 第 21 條：「打包給人用」的腳本不能把過期的產物包成一個看起來全新的檔名）。meta-repo 根目錄的 `build_app_exe.bat` 是入口，先清掉 `bin/`、`obj/` 再呼叫這支腳本。實測 1.7 的安裝檔約 137MB，`staging\app\` 展開約 442MB。
+每一步都是真的重新 build，不沿用舊產物：「打包給人用」的腳本如果沿用舊產物，會把過期的內容包成一個看起來全新的檔名，測起來像是修正沒生效。meta-repo 根目錄的 `build_app_exe.bat` 是入口，先清掉 `bin/`、`obj/` 再呼叫這支腳本。實測 1.7 的安裝檔約 137MB，`staging\app\` 展開約 442MB。
 
 幾個刻意的決定與踩過的坑：
 
@@ -423,7 +423,7 @@ The Windows build's version number is maintained by hand and hardcoded in three 
 
 The version number is deliberately aligned with the Mac build (the same number means the same frontend feature set) and is bumped by hand when the Mac build ships a new version and the Windows build catches up on the equivalent features. Not every version number has a Windows release: 1.6 was a fix in the shared frontend (the page not being locked on cold start), only the Mac build shipped a 1.6 at the time, and Windows went straight from 1.5 to 1.7 — the 1.7 installer is the first to include that fix.
 
-The meta-repo's `update_version` skill only handles the Mac build's `Info.plist` and the backend's `app_versions` table; it does not touch the three places above. Windows' forced-update thresholds live in the backend's `app_versions` table: the new frontend looks up `('windows','default')`, old frontends (1.x and the first 2.0 build) look up `('macos','windows')`. **To force a Windows update, change both rows** — changing only the first leaves anyone on the old frontend unblocked. Once everyone on old frontends has been forced to update, delete `('macos','windows')` and the unused `('windows','10+')` (see "待處理事項" in the meta-repo `CLAUDE.md`). The owner decides these rows and edits them directly in the DB.
+The Mac build's version lives elsewhere (`Info.plist`) and nothing is shared between the two, so the three places above must be changed by hand for each release. Windows' forced-update thresholds live in the backend's `app_versions` table: the new frontend looks up `('windows','default')`, old frontends (1.x and the first 2.0 build) look up `('macos','windows')`. **To force a Windows update, change both rows** — changing only the first leaves anyone on the old frontend unblocked. Once everyone on old frontends has been forced to update, `('macos','windows')` can be deleted. Thresholds are edited directly in the DB.
 
 ### Packaging: the Inno Setup installer
 
@@ -434,7 +434,7 @@ The meta-repo's `update_version` skill only handles the Mac build's `Info.plist`
 3. Re-packages with PyInstaller using `zh-cn-to-tw-ocr-service`'s own venv, and copies the result into `staging\app\ocr-service\`.
 4. Calls Inno Setup's `ISCC.exe` to wrap all of `staging\app\` into `packaging\dist\ZhCnToTw-Setup-<version>.exe`.
 
-Every step genuinely rebuilds and never reuses stale output (per `known-issue-check` item 21: a "package for distribution" script must not wrap stale output under a fresh-looking filename). `build_app_exe.bat` at the meta-repo root is the entry point; it cleans `bin/` and `obj/` first, then calls this script. Measured for 1.7: the installer is about 137MB, and `staging\app\` unpacked is about 442MB.
+Every step genuinely rebuilds and never reuses stale output: a "package for distribution" script that reuses old output wraps stale content under a fresh-looking filename, which then looks like a fix that didn't work. `build_app_exe.bat` at the meta-repo root is the entry point; it cleans `bin/` and `obj/` first, then calls this script. Measured for 1.7: the installer is about 137MB, and `staging\app\` unpacked is about 442MB.
 
 A few deliberate decisions and pitfalls:
 
