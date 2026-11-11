@@ -241,7 +241,7 @@ public partial class MainWindow : Window
             $"ocrToken={Uri.EscapeDataString(_ocrServiceManager.Token)}",
             $"apiBase={Uri.EscapeDataString(apiBase)}",
             "appMajor=2",
-            "appMinor=0",
+            "appMinor=1",
             "osTier=windows");
         return new Uri($"{baseUrl}{separator}{query}");
     }
@@ -346,9 +346,14 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             System.Diagnostics.Trace.WriteLine($"[desktop-signin] 失敗：{ex}");
-            var message = ex.Message.Replace("'", "\\'");
+            // 一定要通知網頁、不能只跳 alert：網頁如果是因為工作途中登入過期
+            // 才請殼登入，它正卡在「等重新登入」，只有殼回報結果才出得來（見
+            // 網頁 js/core/api.js 的 handleDesktopSignInFailed）。
+            // JsonSerializer 產生的是合法的 JS 字串字面值，訊息裡有引號也安全。
+            var literal = JsonSerializer.Serialize(ex.Message);
             await Browser.CoreWebView2.ExecuteScriptAsync(
-                $"window.alert && window.alert('登入失敗，請重試（{message}）')");
+                $"window.__desktopSignInFailed ? window.__desktopSignInFailed({literal})"
+                + $" : (window.alert && window.alert('登入失敗，請重試（' + {literal} + '）'))");
         }
         finally
         {
