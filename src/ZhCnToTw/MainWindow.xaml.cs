@@ -141,10 +141,22 @@ public partial class MainWindow : Window
         // 自己組好的「下載資料夾 + 建議檔名」路徑，這裡只取檔名部分，
         // 換掉目錄；檔名沿用既有的 UniqueDestination 邏輯避免覆蓋掉
         // 使用者前一次下載的同名檔案。
+        //
+        // 只存 .txt／.docx（見 IsAllowedDownloadName），其他的取消下載，
+        // 並請網頁顯示一則提示，不然使用者按了下載卻什麼都沒發生。
         core.DownloadStarting += (_, args) =>
         {
-            var desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             var suggestedName = Path.GetFileName(args.ResultFilePath);
+            if (!IsAllowedDownloadName(suggestedName))
+            {
+                // 不印出檔名：它是網頁給的，不是殼自己產生的內容
+                System.Diagnostics.Trace.WriteLine("[webview-download] 檔名不能用或不是 .txt／.docx，取消下載");
+                args.Cancel = true;
+                _ = core.ExecuteScriptAsync(
+                    "window.showToast && window.showToast(\"下載失敗：檔名不合法，或不是 .txt／.docx 檔\", \"error\")");
+                return;
+            }
+            var desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             args.ResultFilePath = UniqueDestination(desktopDir, suggestedName);
         };
 
@@ -221,25 +233,18 @@ public partial class MainWindow : Window
     /// OCR_SERVICE_TOKEN 傳給子行程的值對不上，本機 OCR 服務的
     /// X-OCR-Token 驗證會全部被拒絕）；apiBase 預設打正式 Render
     /// 後端，WEB_API_BASE_OVERRIDE 只在開發階段用來指到本機另外跑的
-    /// backend。appMajor/appMinor 目前寫死成跟 Mac 版同步的版本號（每次
-    /// Mac 版出新版、Windows 版跟著補上功能對等的改動時一起手動更新），
-    /// 不是真正的版本追蹤機制——Windows 版還沒有自己的 build 編號/發布
-    /// 流程，之後要接上真正的版本追蹤時再改（見 zh-cn-to-tw-backend 的
-    /// app_versions 表）。
+    /// backend。appMajor/appMinor 是這個 App 的版本號（跟 Mac 版同步），
+    /// 寫死在這裡、ZhCnToTw.csproj、packaging/installer.iss 三個地方，
+    /// 出新版要一起改。
     ///
-    /// osTier 刻意不能沿用 Mac 版的 "13+"：zh-cn-to-tw-web 的
-    /// script.js 呼叫 /api/version_check 時 os 參數是寫死的
-    /// "macos"（共用前端本身的既有限制，這支殼不修改那份程式碼），
-    /// 如果 osTier 也用 "13+"，(os=macos, os_version=13+) 這組查詢鍵
-    /// 會直接對上 Mac 版真正在用的那筆政策資料——appMajor/appMinor
-    /// 這裡的佔位值一定比 Mac 版真正的版本號舊，於是被誤判成「Mac 版
-    /// 版本過舊要求強制更新」（實測撞過：畫面跳出「請更新到 1.1」，
-    /// 但 Windows 版根本還沒有 1.1 這個概念）。改用 "windows" 這個
-    /// 後端資料庫裡不存在的值，(os=macos, os_version=windows) 查無
-    /// 政策資料，get_policy 回 None，version_check 一律回報
-    /// force_update=false（見 app.py 的說明：「查無這個 os 的門檻
-    /// 資料時一律不擋」）。之後 Windows 版有自己的版本追蹤機制時，
-    /// 這裡跟 script.js 的 os=macos 硬編碼都要一併檢討。
+    /// osTier=windows：網頁看到這個值，版本檢查會送
+    /// os=windows&amp;os_version=default，查 zh-cn-to-tw-backend 的
+    /// app_versions 裡 ('windows','default') 那一列（見 zh-cn-to-tw-web 的
+    /// js/core/version.js）。不能沿用 Mac 版的分流值（11+、10.15）：那樣
+    /// 查到的是 Mac 版的門檻，Windows 會被 Mac 的強制更新擋下（實測撞過：
+    /// 畫面跳出「請更新到 1.1」，但 Windows 版當時根本還沒有 1.1）。
+    /// 更早的 Windows 版前端送的是 os=macos&amp;os_version=windows，後端還
+    /// 留著那一列給它們。
     /// </summary>
     private Uri BuildDesktopUrl(string baseUrl)
     {
@@ -367,19 +372,23 @@ public partial class MainWindow : Window
         _activeSignIn = signIn;
         try
         {
-            var idToken = await signIn.StartAsync();
+            var signedIn = await signIn.StartAsync();
             // 網頁原本 Google Identity Services 登入成功時就是呼叫這個
-            // 函式（見 script.js 的 handleCredentialResponse）——桌面版
+            // 函式（見 js/auth/login.js 的 handleCredentialResponse）——桌面版
             // 系統瀏覽器登入完成後只是換一種方式把 token 交回網頁，後續
-            // 驗證/儲存/UI 更新完全沿用網頁原本的邏輯。
+            // 驗證/儲存/UI 更新完全沿用網頁原本的邏輯。nonce 是這次登入的
+            // 原值，網頁會跟 token 一起送給後端（見 GoogleDesktopSignIn 的
+            // StartAsync）。
             //
             // token 是從本機那個 port 收進來的內容，放進 JS 之前一律用
             // JsonSerializer 轉成字串字面值（跟下面失敗那條路同一個做法），
             // 不自己跳脫字元：自己跳脫只要漏掉一種字元，字串就會在預期
             // 之外的地方結束，後面的內容被當成程式執行。GoogleDesktopSignIn
             // 已經只放行 JWT 形狀的值，這裡是第二道。
-            var tokenLiteral = JsonSerializer.Serialize(idToken);
-            await Browser.CoreWebView2.ExecuteScriptAsync($"handleCredentialResponse({{credential: {tokenLiteral}}})");
+            var tokenLiteral = JsonSerializer.Serialize(signedIn.IdToken);
+            var nonceLiteral = JsonSerializer.Serialize(signedIn.Nonce);
+            await Browser.CoreWebView2.ExecuteScriptAsync(
+                $"handleCredentialResponse({{credential: {tokenLiteral}, nonce: {nonceLiteral}}})");
             Activate();
         }
         catch (Exception ex)
@@ -450,6 +459,28 @@ public partial class MainWindow : Window
                 System.Diagnostics.Trace.WriteLine($"[activity-guard] 不認得的指令：{action}");
                 break;
         }
+    }
+
+    // 這個 App 只會存這兩種檔案（網頁那邊也只收這兩種，見 zh-cn-to-tw-web
+    // 的 js/core/filename.js）。殼再擋一次，網頁萬一出問題（例如被塞進
+    // 不該有的內容），也沒辦法讓殼把其他類型的檔案存進使用者的電腦。
+    private static readonly string[] AllowedDownloadExtensions = { ".txt", ".docx" };
+
+    /// <summary>
+    /// 下載的檔名能不能用：不能是空的、不能含 Windows 檔名不允許的字元
+    /// （例如「:」，會被當成 NTFS 的替代資料流寫到別的檔案裡），副檔名要是
+    /// .txt 或 .docx。
+    /// </summary>
+    private static bool IsAllowedDownloadName(string filename)
+    {
+        if (string.IsNullOrWhiteSpace(filename)) return false;
+        if (filename.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;
+        var ext = Path.GetExtension(filename);
+        foreach (var allowed in AllowedDownloadExtensions)
+        {
+            if (string.Equals(ext, allowed, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     private static string UniqueDestination(string directory, string filename)

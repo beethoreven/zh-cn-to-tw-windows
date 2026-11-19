@@ -35,7 +35,26 @@ internal sealed class GoogleDesktopSignIn
     // ID Token 的長度上限，同樣遠大於實際值（一兩 KB）。
     private const int MaxTokenChars = 16 * 1024;
 
-    public async Task<string> StartAsync()
+    /// <summary>
+    /// 登入成功的結果。Nonce 是這次登入產生的原值，要跟 ID Token 一起交給
+    /// 後端（見 StartAsync 裡的說明）。
+    /// </summary>
+    public sealed record SignInResult(string IdToken, string Nonce);
+
+    /// <summary>
+    /// 一個完整的回呼要怎麼處理，對應 Mac 版的 CallbackDecision。
+    /// </summary>
+    private enum CallbackDecision
+    {
+        /// <summary>state 相符、id_token 是 JWT 的形狀：這次登入成功。</summary>
+        Accept,
+        /// <summary>state 相符但沒有可用的 token（使用者取消、Google 回報錯誤）：這次登入失敗，不用再等。</summary>
+        Reject,
+        /// <summary>state 不符或沒帶：不是這次登入的回呼，當成沒收到，繼續等。</summary>
+        Ignore,
+    }
+
+    public async Task<SignInResult> StartAsync()
     {
         var listener = new TcpListener(IPAddress.Loopback, LoopbackPort);
         try
@@ -55,7 +74,12 @@ internal sealed class GoogleDesktopSignIn
             // 程式、使用者開著的其他網頁都連得到它；回呼裡的 state 跟這裡
             // 記住的一樣，才能確定它是這次登入的結果，不是別人送進來的內容。
             var state = RandomToken();
-            Process.Start(new ProcessStartInfo(BuildAuthUrl(state)) { UseShellExecute = true });
+            // nonce 原值只留在 App 裡：登入網址帶的是它的 SHA-256，Google
+            // 把這個雜湊原樣放進 ID Token；登入成功後原值跟 token 一起交給
+            // 後端，後端確認兩者對得上才換發 session。token 會經過系統瀏覽器
+            // 跟本機的回呼，原值不會，所以只拿到 token 的人換不到 session。
+            var nonce = RandomToken();
+            Process.Start(new ProcessStartInfo(BuildAuthUrl(state, HashedNonce(nonce))) { UseShellExecute = true });
 
             using var cts = new CancellationTokenSource(SignInTimeout);
 
@@ -63,25 +87,30 @@ internal sealed class GoogleDesktopSignIn
             // 真正帶 id_token 的請求——瀏覽器在導到 127.0.0.1 這個 POST
             // 之前/之後可能會有額外的連線打進來（例如連線預熱、沒有 body
             // 的請求），第一條不一定是真正的 form_post callback。改成迴圈
-            // 接受連線，直到收到通過檢查的回呼或整體逾時為止；每條連線的
+            // 接受連線，直到收到這次登入的回呼或整體逾時為止；每條連線的
             // 原始請求都記到 debug log，之後好對照。
             //
-            // 通過檢查 = state 跟這次登入的一樣，而且 id_token 是 JWT 的
-            // 形狀。不符合的一律當成不是這次登入的回呼，回一個失敗頁面後
-            // 繼續等。
+            // state 不符的一律當成不是這次登入的回呼，回一個失敗頁面後繼續
+            // 等。state 相符就是這次登入的結果：token 可用就成功；沒有可用的
+            // token（使用者在 Google 那邊取消、Google 回報錯誤）就馬上失敗，
+            // 不等到逾時——使用者已經看到瀏覽器裡的失敗頁面，App 不該再空等
+            // 好幾分鐘才說登入失敗。
             while (true)
             {
                 using var client = await AcceptAsync(listener, cts.Token);
                 await using var stream = client.GetStream();
 
                 var (fields, rawRequest) = await ReadCallbackAsync(stream, cts.Token);
-                var token = AcceptedIdToken(fields, state);
-                LogDebug($"連線來自 {client.Client.RemoteEndPoint}，token={(token is null ? "不採用" : "有")}\n----- request -----\n{RedactIdToken(rawRequest)}");
-                await RespondAsync(stream, success: token is not null);
+                var (decision, token) = Decide(fields, state);
+                LogDebug($"連線來自 {client.Client.RemoteEndPoint}，判斷：{decision}\n----- request -----\n{RedactIdToken(rawRequest)}");
+                await RespondAsync(stream, success: decision == CallbackDecision.Accept);
 
-                if (token is not null)
+                switch (decision)
                 {
-                    return token;
+                    case CallbackDecision.Accept:
+                        return new SignInResult(token!, nonce);
+                    case CallbackDecision.Reject:
+                        throw new InvalidOperationException(RejectionReason(fields));
                 }
             }
         }
@@ -132,7 +161,7 @@ internal sealed class GoogleDesktopSignIn
         }
     }
 
-    private static string BuildAuthUrl(string state)
+    private static string BuildAuthUrl(string state, string hashedNonce)
     {
         var query = new[]
         {
@@ -141,7 +170,7 @@ internal sealed class GoogleDesktopSignIn
             "response_type=id_token",
             "response_mode=form_post",
             $"scope={Uri.EscapeDataString("openid email profile")}",
-            $"nonce={RandomToken()}",
+            $"nonce={Uri.EscapeDataString(hashedNonce)}",
             $"state={Uri.EscapeDataString(state)}",
             "prompt=select_account",
             // 明確指定登入/同意畫面的語言，不然預設會是英文（跟 Mac 版
@@ -206,14 +235,37 @@ internal sealed class GoogleDesktopSignIn
         }
     }
 
-    /// 這個回呼能不能當成這次登入的結果：state 要跟這次登入發出去的一樣，
-    /// id_token 要是 JWT 的形狀。通過就回傳 token，否則回傳 null。
-    private static string? AcceptedIdToken(Dictionary<string, string>? fields, string expectedState)
+    /// 這個回呼怎麼處理（見 CallbackDecision）：state 要跟這次登入發出去的
+    /// 一樣才算這次登入的回呼，id_token 要是 JWT 的形狀才算成功。成功時
+    /// 一併回傳 token。對應 Mac 版的 decide(fields:expectedState:)。
+    private static (CallbackDecision Decision, string? IdToken) Decide(Dictionary<string, string>? fields, string expectedState)
     {
-        if (fields is null) return null;
-        if (!fields.TryGetValue("state", out var state) || !string.Equals(state, expectedState, StringComparison.Ordinal)) return null;
-        if (!fields.TryGetValue("id_token", out var token) || !IsCompactJwt(token)) return null;
-        return token;
+        if (fields is null) return (CallbackDecision.Ignore, null);
+        if (!fields.TryGetValue("state", out var state) || !string.Equals(state, expectedState, StringComparison.Ordinal)) return (CallbackDecision.Ignore, null);
+        if (!fields.TryGetValue("id_token", out var token) || !IsCompactJwt(token)) return (CallbackDecision.Reject, null);
+        return (CallbackDecision.Accept, token);
+    }
+
+    /// 登入失敗時給使用者看的原因（會顯示在 App 畫面上）。Google 回報的
+    /// 錯誤代碼（例如使用者取消時的 access_denied）只有在看起來是代碼時
+    /// 才帶上：只收小寫英文字母跟底線，其他內容一律不顯示。
+    private static string RejectionReason(Dictionary<string, string>? fields)
+    {
+        if (fields is not null && fields.TryGetValue("error", out var error) && IsErrorCode(error))
+        {
+            return $"Google 沒有完成登入（{error}）";
+        }
+        return "Google 沒有完成登入（沒有收到登入憑證）";
+    }
+
+    private static bool IsErrorCode(string value)
+    {
+        if (value.Length == 0 || value.Length > 64) return false;
+        foreach (var c in value)
+        {
+            if (!((c >= 'a' && c <= 'z') || c == '_')) return false;
+        }
+        return true;
     }
 
     /// ID Token 是 JWT：三段 base64url，中間用「.」隔開，只會有英數、
@@ -292,4 +344,13 @@ internal sealed class GoogleDesktopSignIn
     }
 
     private static string RandomToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+
+    /// nonce 原值的 SHA-256，base64url、不帶「=」。後端用同一個算法比對
+    /// （zh-cn-to-tw-backend 的 auth_utils/auth.py 的 hashed_nonce），兩邊
+    /// 任何一點不同（大小寫、補不補「=」）登入都會失敗。
+    private static string HashedNonce(string raw) =>
+        Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(raw)))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
 }

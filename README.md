@@ -108,17 +108,21 @@ shim 只補這支殼真的會處理的 channel（`consoleLog`、`desktopSignIn`�
 WKWebView/WebView2 這類內嵌瀏覽器都不是「真正的瀏覽器」，Google 會限制或降級內嵌瀏覽器裡的 OAuth 流程。這支殼跟 Mac 版（`GoogleDesktopSignIn.swift`）走同一套協定，也是 Google 官方對原生桌面 App 建議的做法（RFC 8252：OAuth 2.0 for Native Apps）：
 
 1. 本機起一個 loopback TCP 監聽，固定在 `127.0.0.1:53682`。
-2. 用系統瀏覽器開 Google 登入頁，`redirect_uri` 指到這個本機監聽的 `/callback`，並帶上這次登入專屬的隨機 `state`。
+2. 用系統瀏覽器開 Google 登入頁，`redirect_uri` 指到這個本機監聽的 `/callback`，並帶上這次登入專屬的隨機 `state`，以及這次登入的 nonce 原值的 SHA-256。
 3. 使用者在真正的瀏覽器分頁完成登入，Google 用 `response_mode=form_post` 把 `id_token` 連同 `state` POST 回這個本機監聽。
-4. 確認 `state` 是這次登入發出去的那一個、`id_token` 是 JWT 的形狀（三段 base64url），才把 token 交給網頁既有的 `handleCredentialResponse()`，後續驗證/儲存/UI 更新完全沿用網頁原本的邏輯。不符合的請求一律當成不是這次登入的回呼，回一個失敗頁面後繼續等。
+4. `state` 不是這次登入發出去的那一個（或沒帶），一律當成不是這次登入的回呼，回一個失敗頁面後繼續等。`state` 相符就是這次登入的結果：`id_token` 是 JWT 的形狀（三段 base64url）就連同 nonce 原值交給網頁既有的 `handleCredentialResponse()`，後續驗證/儲存/UI 更新完全沿用網頁原本的邏輯；沒有可用的 token（使用者在 Google 那邊取消、Google 回報錯誤）就立即回報登入失敗，不等到 300 秒逾時。失敗原因只在看起來是 OAuth 錯誤代碼時帶上 Google 給的值（例如 `access_denied`，只收小寫英文字母跟底線），因為它會顯示在畫面上。
 
-為什麼要比對 `state`：這個 port 是固定的，同一台電腦上的其他程式、使用者開著的其他網頁都連得到它；`state` 只出現在這次開出去的登入網址與 Google 的回呼裡，比對它才能確定收到的是這次登入的結果。token 交給網頁時用 `JsonSerializer` 轉成 JavaScript 的字串字面值，不自己跳脫字元——自己跳脫只要漏掉一種，字串就會在預期之外的地方結束。這兩項是 2026-11-19 加上的，跟 Mac 版同一套邏輯（Mac 版已實測），Windows 這邊還沒有編譯與實測過。
+為什麼要比對 `state`：這個 port 是固定的，同一台電腦上的其他程式、使用者開著的其他網頁都連得到它；`state` 只出現在這次開出去的登入網址與 Google 的回呼裡，比對它才能確定收到的是這次登入的結果。token 交給網頁時用 `JsonSerializer` 轉成 JavaScript 的字串字面值，不自己跳脫字元——自己跳脫只要漏掉一種，字串就會在預期之外的地方結束。
+
+為什麼要帶 nonce：nonce 原值只留在 App 裡，Google 只看到它的雜湊，原樣放進 ID Token；網頁把 token 跟原值一起送給後端，後端確認對得上才換發 session（見 `zh-cn-to-tw-backend` 的 README「登入」一節）。token 會經過系統瀏覽器跟本機回呼，原值不會，所以只拿到 token 的人換不到 session。雜湊算法（`HashedNonce`）要跟後端與 Mac 版一字不差。
+
+這些都跟 Mac 版同一套邏輯（Mac 版已實測）。`state` 比對與 `JsonSerializer` 已經編譯進 2.2 的安裝檔；nonce、立即失敗、下面的副檔名限制是之後加的，Windows 這邊還沒有編譯與實測過。
 
 `client_id` 直接沿用 Mac 版那一組（`GoogleDesktopSignIn.cs` 裡的常數）——Google Cloud Console 的「已授權的重新導向 URI」是精確字串比對，Mac 版已經登記過 `http://127.0.0.1:53682/callback`，Windows 用同一個 port/path 不需要另外申請。
 
 刻意不用 `HttpListener`（.NET 內建的 HTTP.SYS 封裝）：在部分 Windows 環境下，非管理員身分監聽 HTTP prefix 需要先用 `netsh` 保留 URL ACL，不該要求一般使用者為了登入先跑一次系統管理員指令。改用最原始的 `TcpListener`，手動解析最小可用的 HTTP 請求/回應——跟 Mac 版用 `NWListener` 直接處理原始 TCP 是同一個理由。
 
-**踩到的坑：登入偶爾卡在「沒有取得 id_token」**。原本 loopback 監聽只接受第一條連線就關掉；如果有額外的連線先搶到這唯一一次 accept（例如瀏覽器的連線預熱），真正帶 `id_token` 的 callback 反而會在監聽已關閉的狀態下被拒絕連線。改成迴圈接受連線，直到收到通過檢查的回呼或整體逾時（300 秒）為止。已用真實 Google 帳號在本機重現並確認修復有效。除錯 log 寫在 `%LocalAppData%\ZhCnToTw\oauth_debug.log`，`id_token` 是遮罩後才寫入磁碟的，只留長度方便比對。
+**踩到的坑：登入偶爾卡在「沒有取得 id_token」**。原本 loopback 監聽只接受第一條連線就關掉；如果有額外的連線先搶到這唯一一次 accept（例如瀏覽器的連線預熱），真正帶 `id_token` 的 callback 反而會在監聽已關閉的狀態下被拒絕連線。改成迴圈接受連線，直到收到這次登入的回呼或整體逾時（300 秒）為止。已用真實 Google 帳號在本機重現並確認修復有效。除錯 log 寫在 `%LocalAppData%\ZhCnToTw\oauth_debug.log`，`id_token` 是遮罩後才寫入磁碟的，只留長度方便比對。
 
 ### 踩到的坑：Windows 版被誤判成「過舊的 Mac 版」要求強制更新
 
@@ -165,7 +169,7 @@ Mac 版的版本號在別的地方（`Info.plist`），兩邊沒有共用機制�
 
 ### 下載存到桌面
 
-各 Stage 的「下載結果」走 `fetch` + blob + `<a download>` 這條標準路徑，WebView2 原生就認得。`DownloadStarting` 事件把存檔目錄從系統「下載」資料夾換成桌面，檔名用 `UniqueDestination` 加 ` (1)`、` (2)` 後綴避免覆蓋使用者前一次下載的同名檔案。`legacyDownload` channel（網頁把檔案內容交給殼寫檔，Mac `10.15` 那包才需要）這支殼沒有提供：注入的 shim 不補它，網頁偵測不到就不會呼叫——讓網頁直接叫殼寫檔的管道，沒有需要就不開。
+各 Stage 的「下載結果」走 `fetch` + blob + `<a download>` 這條標準路徑，WebView2 原生就認得。`DownloadStarting` 事件把存檔目錄從系統「下載」資料夾換成桌面，檔名用 `UniqueDestination` 加 ` (1)`、` (2)` 後綴避免覆蓋使用者前一次下載的同名檔案。同一個事件也只放行 `.txt`／`.docx`（`IsAllowedDownloadName`）：這個 App 只會產生這兩種檔案，網頁那邊也只收這兩種，殼再擋一次；檔名含 Windows 不允許的字元（例如 `:`，會被當成 NTFS 的替代資料流寫進別的檔案）也不收。不收的取消下載，並請網頁顯示一則錯誤提示（呼叫網頁的 `showToast`），不然使用者按了下載卻什麼都沒發生。`legacyDownload` channel（網頁把檔案內容交給殼寫檔，Mac `10.15` 那包才需要）這支殼沒有提供：注入的 shim 不補它，網頁偵測不到就不會呼叫——讓網頁直接叫殼寫檔的管道，沒有需要就不開。
 
 ### 檔案結構
 
@@ -397,17 +401,21 @@ The practical effect of this design: as long as a new frontend feature needs no 
 Embedded WebViews (WKWebView or WebView2 alike) aren't "real" browsers, and Google restricts or degrades OAuth flows run inside them. This shell follows the same protocol as the Mac build (`GoogleDesktopSignIn.swift`) — also Google's own recommendation for native desktop apps (RFC 8252, OAuth 2.0 for Native Apps):
 
 1. Start a loopback TCP listener locally, fixed at `127.0.0.1:53682`.
-2. Open Google's sign-in page in the system browser, with `redirect_uri` pointing at this local listener's `/callback` and a random `state` unique to this sign-in attempt.
+2. Open Google's sign-in page in the system browser, with `redirect_uri` pointing at this local listener's `/callback`, a random `state` unique to this sign-in attempt, and the SHA-256 of this attempt's raw nonce.
 3. The user completes sign-in in a real browser tab; Google POSTs the `id_token` together with the `state` back to the local listener via `response_mode=form_post`.
-4. Only once the `state` is confirmed to be the one this attempt sent out, and the `id_token` has the shape of a JWT (three base64url segments), is the token handed to the page's existing `handleCredentialResponse()` — all subsequent validation, storage, and UI updates reuse the page's existing logic unchanged. Any request that doesn't qualify is treated as not being this attempt's callback: it gets a failure page and the listener keeps waiting.
+4. A request whose `state` isn't the one this attempt sent out (or has none) is treated as not being this attempt's callback: it gets a failure page and the listener keeps waiting. A matching `state` is this attempt's result: if the `id_token` has the shape of a JWT (three base64url segments), it is handed together with the raw nonce to the page's existing `handleCredentialResponse()` — all subsequent validation, storage, and UI updates reuse the page's existing logic unchanged; if there's no usable token (the user cancelled at Google, or Google reported an error), sign-in fails immediately instead of waiting out the 300-second timeout. The failure reason includes Google's value only when it looks like an OAuth error code (e.g. `access_denied`; lowercase letters and underscores only), because it is shown on screen.
 
-Why the `state` is checked: the port is fixed, so any other program on the same machine, and any web page the user has open, can reach it; the `state` appears only in the sign-in URL opened for this attempt and in Google's callback, so matching it is what establishes that the request is the result of this sign-in. The token is handed to the page as a JavaScript string literal produced by `JsonSerializer` rather than hand-escaped — hand-escaping only has to miss one character for the string to end somewhere unexpected. Both were added on 2026-11-19 and follow the same logic as the Mac build (which has been tested); on Windows they have not yet been compiled or tested.
+Why the `state` is checked: the port is fixed, so any other program on the same machine, and any web page the user has open, can reach it; the `state` appears only in the sign-in URL opened for this attempt and in Google's callback, so matching it is what establishes that the request is the result of this sign-in. The token is handed to the page as a JavaScript string literal produced by `JsonSerializer` rather than hand-escaped — hand-escaping only has to miss one character for the string to end somewhere unexpected.
+
+Why a nonce is sent: the raw nonce stays inside the app; Google only sees its hash, which it copies verbatim into the ID Token. The page sends the token together with the raw value to the backend, which issues a session only if they match (see the "Sign-In" section of `zh-cn-to-tw-backend`'s README). The token passes through the system browser and the local callback, but the raw value does not, so someone who only obtains the token cannot exchange it for a session. The hash (`HashedNonce`) must be computed exactly as the backend and the Mac build compute it.
+
+All of this follows the same logic as the Mac build (which has been tested). The `state` check and `JsonSerializer` are compiled into the 2.2 installer; the nonce, the immediate failure, and the extension restriction below were added afterwards and have not yet been compiled or tested on Windows.
 
 The `client_id` is the same one the Mac build uses (a constant in `GoogleDesktopSignIn.cs`) — Google Cloud Console's "Authorized redirect URIs" is an exact string match, and the Mac build already has `http://127.0.0.1:53682/callback` registered, so Windows reuses the same port/path without needing a separate registration.
 
 `HttpListener` (.NET's HTTP.SYS wrapper) was deliberately avoided: on some Windows setups, listening on an HTTP prefix as a non-administrator requires a `netsh` URL ACL reservation beforehand, and users shouldn't have to run an admin command just to sign in. A raw `TcpListener` is used instead, manually parsing the minimal HTTP request/response needed — the same reasoning as the Mac build's direct use of `NWListener` at the raw TCP level.
 
-**Bug hit: sign-in occasionally stuck on "no id_token received"**. The loopback listener originally accepted only the first connection and then closed; if an extra connection grabbed that single accept first (for example the browser's connection pre-warming), the real callback carrying the `id_token` was refused because the listener was already closed. It now loops accepting connections until a callback passes the checks or the overall timeout (300 seconds) elapses. Reproduced locally with a real Google account and confirmed fixed. A debug log is written to `%LocalAppData%\ZhCnToTw\oauth_debug.log`; the `id_token` is redacted before being written to disk, keeping only its length for comparison.
+**Bug hit: sign-in occasionally stuck on "no id_token received"**. The loopback listener originally accepted only the first connection and then closed; if an extra connection grabbed that single accept first (for example the browser's connection pre-warming), the real callback carrying the `id_token` was refused because the listener was already closed. It now loops accepting connections until this attempt's callback arrives or the overall timeout (300 seconds) elapses. Reproduced locally with a real Google account and confirmed fixed. A debug log is written to `%LocalAppData%\ZhCnToTw\oauth_debug.log`; the `id_token` is redacted before being written to disk, keeping only its length for comparison.
 
 ### Bug hit during testing: the Windows build was misidentified as an outdated Mac build
 
@@ -454,7 +462,7 @@ A few deliberate decisions and pitfalls:
 
 ### Downloads go to the Desktop
 
-Every Stage's "download result" buttons use the standard `fetch` + blob + `<a download>` path, which WebView2 handles natively. The `DownloadStarting` event redirects the save directory from the system "Downloads" folder to the Desktop, with `UniqueDestination` adding ` (1)`, ` (2)` suffixes so a previous download of the same name isn't overwritten. The `legacyDownload` channel (the page hands file content to the shell to write; only the Mac `10.15` build needs it) is not provided by this shell: the injected shim doesn't define it, and the page won't call a channel it can't detect — a channel that lets the page tell the shell to write a file stays closed unless it is needed.
+Every Stage's "download result" buttons use the standard `fetch` + blob + `<a download>` path, which WebView2 handles natively. The `DownloadStarting` event redirects the save directory from the system "Downloads" folder to the Desktop, with `UniqueDestination` adding ` (1)`, ` (2)` suffixes so a previous download of the same name isn't overwritten. The same event also lets through only `.txt`/`.docx` (`IsAllowedDownloadName`): those are the only two kinds of file this app produces, the page accepts only these too, and the shell checks again; a name containing a character Windows doesn't allow in file names (such as `:`, which would be treated as an NTFS alternate data stream and written into another file) is rejected too. A rejected download is cancelled and the page is asked to show an error message (by calling the page's `showToast`) — otherwise the user would press download and see nothing happen. The `legacyDownload` channel (the page hands file content to the shell to write; only the Mac `10.15` build needs it) is not provided by this shell: the injected shim doesn't define it, and the page won't call a channel it can't detect — a channel that lets the page tell the shell to write a file stays closed unless it is needed.
 
 ### File Structure
 
