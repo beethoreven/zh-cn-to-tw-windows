@@ -29,6 +29,12 @@ internal sealed class GoogleDesktopSignIn
     private const string ClientId = "415031055130-73moi9aantfm5hjojmt1r0isk2uo35mr.apps.googleusercontent.com";
     private static readonly TimeSpan SignInTimeout = TimeSpan.FromSeconds(300);
 
+    // 一個請求最多收多少。Google 的回呼只有一個 ID Token 加幾個短欄位，
+    // 兩三 KB；超過這個大小的不可能是它，不必繼續收下去。
+    private const int MaxRequestBytes = 64 * 1024;
+    // ID Token 的長度上限，同樣遠大於實際值（一兩 KB）。
+    private const int MaxTokenChars = 16 * 1024;
+
     public async Task<string> StartAsync()
     {
         var listener = new TcpListener(IPAddress.Loopback, LoopbackPort);
@@ -44,7 +50,12 @@ internal sealed class GoogleDesktopSignIn
 
         try
         {
-            Process.Start(new ProcessStartInfo(BuildAuthUrl()) { UseShellExecute = true });
+            // state 是這一次登入專屬的隨機值：放進登入網址，Google 會原樣
+            // 放在回呼裡送回來。這個 port 是固定的，同一台電腦上的其他
+            // 程式、使用者開著的其他網頁都連得到它；回呼裡的 state 跟這裡
+            // 記住的一樣，才能確定它是這次登入的結果，不是別人送進來的內容。
+            var state = RandomToken();
+            Process.Start(new ProcessStartInfo(BuildAuthUrl(state)) { UseShellExecute = true });
 
             using var cts = new CancellationTokenSource(SignInTimeout);
 
@@ -52,15 +63,20 @@ internal sealed class GoogleDesktopSignIn
             // 真正帶 id_token 的請求——瀏覽器在導到 127.0.0.1 這個 POST
             // 之前/之後可能會有額外的連線打進來（例如連線預熱、沒有 body
             // 的請求），第一條不一定是真正的 form_post callback。改成迴圈
-            // 接受連線，直到解析出 id_token 或整體逾時為止；每條連線的
+            // 接受連線，直到收到通過檢查的回呼或整體逾時為止；每條連線的
             // 原始請求都記到 debug log，之後好對照。
+            //
+            // 通過檢查 = state 跟這次登入的一樣，而且 id_token 是 JWT 的
+            // 形狀。不符合的一律當成不是這次登入的回呼，回一個失敗頁面後
+            // 繼續等。
             while (true)
             {
                 using var client = await AcceptAsync(listener, cts.Token);
                 await using var stream = client.GetStream();
 
-                var (token, rawHeaders) = await ReadIdTokenAsync(stream, cts.Token);
-                LogDebug($"連線來自 {client.Client.RemoteEndPoint}，token={(token is null ? "null" : "有")}\n----- headers -----\n{RedactIdToken(rawHeaders)}");
+                var (fields, rawRequest) = await ReadCallbackAsync(stream, cts.Token);
+                var token = AcceptedIdToken(fields, state);
+                LogDebug($"連線來自 {client.Client.RemoteEndPoint}，token={(token is null ? "不採用" : "有")}\n----- request -----\n{RedactIdToken(rawRequest)}");
                 await RespondAsync(stream, success: token is not null);
 
                 if (token is not null)
@@ -116,7 +132,7 @@ internal sealed class GoogleDesktopSignIn
         }
     }
 
-    private static string BuildAuthUrl()
+    private static string BuildAuthUrl(string state)
     {
         var query = new[]
         {
@@ -126,7 +142,7 @@ internal sealed class GoogleDesktopSignIn
             "response_mode=form_post",
             $"scope={Uri.EscapeDataString("openid email profile")}",
             $"nonce={RandomToken()}",
-            $"state={RandomToken()}",
+            $"state={Uri.EscapeDataString(state)}",
             "prompt=select_account",
             // 明確指定登入/同意畫面的語言，不然預設會是英文（跟 Mac 版
             // 同樣的理由）。
@@ -136,15 +152,16 @@ internal sealed class GoogleDesktopSignIn
     }
 
     /// 只處理這個一次性用途需要的最小 HTTP 解析：找 headers/body 分界、
-    /// 讀 Content-Length 對應長度的 body，從 form-urlencoded 格式解析出
-    /// id_token 欄位——不是通用 HTTP 伺服器，跟 Mac 版的
-    /// extractIDToken(from:) 對應同一套邏輯。
+    /// 讀 Content-Length 對應長度的 body，拆出 form-urlencoded 的欄位——
+    /// 不是通用 HTTP 伺服器，跟 Mac 版的 parseCallback(_:) 對應同一套
+    /// 邏輯。回傳的 Fields 是 null 代表這條連線沒有送來一個完整的 form
+    /// POST。
     ///
     /// 順手處理 Expect: 100-continue 握手（有些 HTTP client 送 body 前會
     /// 先等這個）——這不是真正救回登入失敗的原因（實測用真實 Chrome
     /// 151 送出的 callback 請求並沒有帶 Expect header），純粹是符合
     /// HTTP 語意的防禦性寫法，留著無害。
-    private static async Task<(string? Token, string RawHeaders)> ReadIdTokenAsync(NetworkStream stream, CancellationToken ct)
+    private static async Task<(Dictionary<string, string>? Fields, string RawRequest)> ReadCallbackAsync(NetworkStream stream, CancellationToken ct)
     {
         var buffer = new MemoryStream();
         var chunk = new byte[8192];
@@ -162,6 +179,7 @@ internal sealed class GoogleDesktopSignIn
             }
             if (read <= 0) return (null, "(連線關閉，沒有讀到任何內容)");
             buffer.Write(chunk, 0, read);
+            if (buffer.Length > MaxRequestBytes) return (null, "(請求過大，不是 callback)");
 
             var text = Encoding.UTF8.GetString(buffer.ToArray());
             var headerEnd = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
@@ -181,10 +199,41 @@ internal sealed class GoogleDesktopSignIn
 
             var contentLength = ParseContentLength(headerPart);
             if (contentLength is null) return (null, headerPart + "\n(沒有 Content-Length，視為不是 callback 的 POST)");
+            if (contentLength.Value < 0 || contentLength.Value > MaxRequestBytes) return (null, headerPart + "\n(Content-Length 不合理，視為不是 callback 的 POST)");
             if (Encoding.UTF8.GetByteCount(bodyPart) < contentLength.Value) continue; // body 還沒收完整，等下一輪
 
-            return (ParseIdToken(bodyPart), headerPart + "\n\n" + bodyPart);
+            return (ParseFormFields(bodyPart), headerPart + "\n\n" + bodyPart);
         }
+    }
+
+    /// 這個回呼能不能當成這次登入的結果：state 要跟這次登入發出去的一樣，
+    /// id_token 要是 JWT 的形狀。通過就回傳 token，否則回傳 null。
+    private static string? AcceptedIdToken(Dictionary<string, string>? fields, string expectedState)
+    {
+        if (fields is null) return null;
+        if (!fields.TryGetValue("state", out var state) || !string.Equals(state, expectedState, StringComparison.Ordinal)) return null;
+        if (!fields.TryGetValue("id_token", out var token) || !IsCompactJwt(token)) return null;
+        return token;
+    }
+
+    /// ID Token 是 JWT：三段 base64url，中間用「.」隔開，只會有英數、
+    /// 「-」、「_」。形狀不對的一律不收——這個值接下來會交給網頁，不該讓
+    /// 任何其他字元有機會跟著進去。
+    private static bool IsCompactJwt(string token)
+    {
+        if (token.Length == 0 || token.Length > MaxTokenChars) return false;
+        var segments = token.Split('.');
+        if (segments.Length != 3) return false;
+        foreach (var segment in segments)
+        {
+            if (segment.Length == 0) return false;
+            foreach (var c in segment)
+            {
+                var allowed = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-' || c == '_';
+                if (!allowed) return false;
+            }
+        }
+        return true;
     }
 
     private static bool HasExpectContinue(string headers)
@@ -213,18 +262,21 @@ internal sealed class GoogleDesktopSignIn
         return null;
     }
 
-    private static string? ParseIdToken(string body)
+    private static Dictionary<string, string> ParseFormFields(string body)
     {
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var pair in body.Split('&'))
         {
             var kv = pair.Split('=', 2);
-            if (kv.Length != 2 || kv[0] != "id_token") continue;
+            if (kv.Length != 2) continue;
             // application/x-www-form-urlencoded：+ 代表空白，要先換成
             // 空白再做 percent-decoding，順序不能反過來。
-            var normalized = kv[1].Replace("+", " ");
-            return Uri.UnescapeDataString(normalized);
+            var key = Uri.UnescapeDataString(kv[0].Replace("+", " "));
+            var value = Uri.UnescapeDataString(kv[1].Replace("+", " "));
+            // 同名欄位只認第一個
+            fields.TryAdd(key, value);
         }
-        return null;
+        return fields;
     }
 
     private static async Task RespondAsync(NetworkStream stream, bool success)

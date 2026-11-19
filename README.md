@@ -83,6 +83,8 @@ Windows 沒有直接對應 macOS WKWebView 的原生框架。WebView2 是微軟�
 
 刻意不修改 `zh-cn-to-tw-web`（那是 Mac/Windows 共用的前端，改了兩邊都要重新驗證，風險比較高）。改成在這支殼裡用 `CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync` 注入一段 shim，在頁面載入前就把 `window.webkit.messageHandlers` 這個物件補上，內部把同樣的呼叫轉送到 WebView2 原生的 `window.chrome.webview.postMessage`；殼這邊再用 `CoreWebView2.WebMessageReceived` 依訊息裡的 `channel` 欄位分派到對應的 C# 處理函式（`MainWindow.xaml.cs` 的 `OnWebMessageReceived`）。網頁那邊完全不用知道自己現在是跑在哪一種殼上面。
 
+shim 只補這支殼真的會處理的 channel（`consoleLog`、`desktopSignIn`、`ocrService`、`activityGuard`）。殼處理每一則訊息之前，先確認送訊息的頁面跟殼自己載入的網址是同一個來源（`IsFromOwnPage`），不是就略過並留一行 log——WebView 萬一被帶到別的網站，那個網站一樣呼叫得到 `window.chrome.webview.postMessage`。依 WebView2 的文件，`CoreWebView2.WebMessageReceived` 只會收到最外層文件送的訊息（iframe 的訊息走 `CoreWebView2Frame` 自己的事件，這支殼沒有訂閱）。這項檢查是 2026-11-19 加上的，還沒有在 Windows 上編譯與實測過。
+
 這個設計的實際效果：前端新增的功能只要不需要新的橋接 channel，Windows 殼一行都不用改。1.3 的「進行LLM潤飾」開關、1.7 的「切割左右頁格式」開關都是這樣——後者的參數是前端直接用 HTTP 送給本機 OCR 服務的，殼不經手。
 
 ### 本機 OCR 服務：用到才開、用完就關
@@ -106,15 +108,17 @@ Windows 沒有直接對應 macOS WKWebView 的原生框架。WebView2 是微軟�
 WKWebView/WebView2 這類內嵌瀏覽器都不是「真正的瀏覽器」，Google 會限制或降級內嵌瀏覽器裡的 OAuth 流程。這支殼跟 Mac 版（`GoogleDesktopSignIn.swift`）走同一套協定，也是 Google 官方對原生桌面 App 建議的做法（RFC 8252：OAuth 2.0 for Native Apps）：
 
 1. 本機起一個 loopback TCP 監聽，固定在 `127.0.0.1:53682`。
-2. 用系統瀏覽器開 Google 登入頁，`redirect_uri` 指到這個本機監聽的 `/callback`。
-3. 使用者在真正的瀏覽器分頁完成登入，Google 用 `response_mode=form_post` 把 `id_token` POST 回這個本機監聽。
-4. 解析出 token，塞回網頁既有的 `handleCredentialResponse()`，後續驗證/儲存/UI 更新完全沿用網頁原本的邏輯。
+2. 用系統瀏覽器開 Google 登入頁，`redirect_uri` 指到這個本機監聽的 `/callback`，並帶上這次登入專屬的隨機 `state`。
+3. 使用者在真正的瀏覽器分頁完成登入，Google 用 `response_mode=form_post` 把 `id_token` 連同 `state` POST 回這個本機監聽。
+4. 確認 `state` 是這次登入發出去的那一個、`id_token` 是 JWT 的形狀（三段 base64url），才把 token 交給網頁既有的 `handleCredentialResponse()`，後續驗證/儲存/UI 更新完全沿用網頁原本的邏輯。不符合的請求一律當成不是這次登入的回呼，回一個失敗頁面後繼續等。
+
+為什麼要比對 `state`：這個 port 是固定的，同一台電腦上的其他程式、使用者開著的其他網頁都連得到它；`state` 只出現在這次開出去的登入網址與 Google 的回呼裡，比對它才能確定收到的是這次登入的結果。token 交給網頁時用 `JsonSerializer` 轉成 JavaScript 的字串字面值，不自己跳脫字元——自己跳脫只要漏掉一種，字串就會在預期之外的地方結束。這兩項是 2026-11-19 加上的，跟 Mac 版同一套邏輯（Mac 版已實測），Windows 這邊還沒有編譯與實測過。
 
 `client_id` 直接沿用 Mac 版那一組（`GoogleDesktopSignIn.cs` 裡的常數）——Google Cloud Console 的「已授權的重新導向 URI」是精確字串比對，Mac 版已經登記過 `http://127.0.0.1:53682/callback`，Windows 用同一個 port/path 不需要另外申請。
 
 刻意不用 `HttpListener`（.NET 內建的 HTTP.SYS 封裝）：在部分 Windows 環境下，非管理員身分監聽 HTTP prefix 需要先用 `netsh` 保留 URL ACL，不該要求一般使用者為了登入先跑一次系統管理員指令。改用最原始的 `TcpListener`，手動解析最小可用的 HTTP 請求/回應——跟 Mac 版用 `NWListener` 直接處理原始 TCP 是同一個理由。
 
-**踩到的坑：登入偶爾卡在「沒有取得 id_token」**。原本 loopback 監聽只接受第一條連線就關掉；如果有額外的連線先搶到這唯一一次 accept（例如瀏覽器的連線預熱），真正帶 `id_token` 的 callback 反而會在監聽已關閉的狀態下被拒絕連線。改成迴圈接受連線，直到解析出 `id_token` 或整體逾時（300 秒）為止。已用真實 Google 帳號在本機重現並確認修復有效。除錯 log 寫在 `%LocalAppData%\ZhCnToTw\oauth_debug.log`，`id_token` 是遮罩後才寫入磁碟的，只留長度方便比對。
+**踩到的坑：登入偶爾卡在「沒有取得 id_token」**。原本 loopback 監聽只接受第一條連線就關掉；如果有額外的連線先搶到這唯一一次 accept（例如瀏覽器的連線預熱），真正帶 `id_token` 的 callback 反而會在監聽已關閉的狀態下被拒絕連線。改成迴圈接受連線，直到收到通過檢查的回呼或整體逾時（300 秒）為止。已用真實 Google 帳號在本機重現並確認修復有效。除錯 log 寫在 `%LocalAppData%\ZhCnToTw\oauth_debug.log`，`id_token` 是遮罩後才寫入磁碟的，只留長度方便比對。
 
 ### 踩到的坑：Windows 版被誤判成「過舊的 Mac 版」要求強制更新
 
@@ -161,7 +165,7 @@ Mac 版的版本號在別的地方（`Info.plist`），兩邊沒有共用機制�
 
 ### 下載存到桌面
 
-各 Stage 的「下載結果」走 `fetch` + blob + `<a download>` 這條標準路徑，WebView2 原生就認得。`DownloadStarting` 事件把存檔目錄從系統「下載」資料夾換成桌面，檔名用 `UniqueDestination` 加 ` (1)`、` (2)` 後綴避免覆蓋使用者前一次下載的同名檔案。`legacyDownload` channel 也有實作（同樣寫到桌面），但 `script.js` 只有在 `osTier === "10.15"` 才會走那條路，Windows 上實際不會被觸發，只是備援。
+各 Stage 的「下載結果」走 `fetch` + blob + `<a download>` 這條標準路徑，WebView2 原生就認得。`DownloadStarting` 事件把存檔目錄從系統「下載」資料夾換成桌面，檔名用 `UniqueDestination` 加 ` (1)`、` (2)` 後綴避免覆蓋使用者前一次下載的同名檔案。`legacyDownload` channel（網頁把檔案內容交給殼寫檔，Mac `10.15` 那包才需要）這支殼沒有提供：注入的 shim 不補它，網頁偵測不到就不會呼叫——讓網頁直接叫殼寫檔的管道，沒有需要就不開。
 
 ### 檔案結構
 
@@ -368,6 +372,8 @@ There is currently **no** WebView2 Runtime detection or automatic installation: 
 
 `zh-cn-to-tw-web` was deliberately left unmodified (it's the frontend shared by both platforms; changing it means re-validating both). Instead, this shell injects a shim via `CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync` that defines `window.webkit.messageHandlers` before the page's own scripts run, forwarding the same calls to WebView2's native `window.chrome.webview.postMessage`; the shell then dispatches on `CoreWebView2.WebMessageReceived` based on a `channel` field to the matching C# handler (`OnWebMessageReceived` in `MainWindow.xaml.cs`). The web page never needs to know which shell it's running inside.
 
+The shim only defines the channels this shell actually handles (`consoleLog`, `desktopSignIn`, `ocrService`, `activityGuard`). Before handling any message, the shell checks that the sending page has the same origin as the URL the shell itself loaded (`IsFromOwnPage`), and otherwise ignores it and writes one log line — if the WebView were ever navigated to another site, that site could call `window.chrome.webview.postMessage` just the same. Per the WebView2 documentation, `CoreWebView2.WebMessageReceived` only receives messages posted by the top-level document (messages from iframes go to `CoreWebView2Frame`'s own event, which this shell does not subscribe to). This check was added on 2026-11-19 and has not yet been compiled or tested on Windows.
+
 The practical effect of this design: as long as a new frontend feature needs no new bridge channel, the Windows shell needs no changes at all. The "LLM refinement" toggle in 1.3 and the "split left/right pages" toggle in 1.7 both worked this way — the latter's parameter is sent by the frontend straight to the local OCR service over HTTP, never passing through the shell.
 
 ### Local OCR service: started on demand, stopped when done
@@ -391,15 +397,17 @@ The practical effect of this design: as long as a new frontend feature needs no 
 Embedded WebViews (WKWebView or WebView2 alike) aren't "real" browsers, and Google restricts or degrades OAuth flows run inside them. This shell follows the same protocol as the Mac build (`GoogleDesktopSignIn.swift`) — also Google's own recommendation for native desktop apps (RFC 8252, OAuth 2.0 for Native Apps):
 
 1. Start a loopback TCP listener locally, fixed at `127.0.0.1:53682`.
-2. Open Google's sign-in page in the system browser, with `redirect_uri` pointing at this local listener's `/callback`.
-3. The user completes sign-in in a real browser tab; Google POSTs the `id_token` back to the local listener via `response_mode=form_post`.
-4. The token is parsed out and handed to the page's existing `handleCredentialResponse()` — all subsequent validation, storage, and UI updates reuse the page's existing logic unchanged.
+2. Open Google's sign-in page in the system browser, with `redirect_uri` pointing at this local listener's `/callback` and a random `state` unique to this sign-in attempt.
+3. The user completes sign-in in a real browser tab; Google POSTs the `id_token` together with the `state` back to the local listener via `response_mode=form_post`.
+4. Only once the `state` is confirmed to be the one this attempt sent out, and the `id_token` has the shape of a JWT (three base64url segments), is the token handed to the page's existing `handleCredentialResponse()` — all subsequent validation, storage, and UI updates reuse the page's existing logic unchanged. Any request that doesn't qualify is treated as not being this attempt's callback: it gets a failure page and the listener keeps waiting.
+
+Why the `state` is checked: the port is fixed, so any other program on the same machine, and any web page the user has open, can reach it; the `state` appears only in the sign-in URL opened for this attempt and in Google's callback, so matching it is what establishes that the request is the result of this sign-in. The token is handed to the page as a JavaScript string literal produced by `JsonSerializer` rather than hand-escaped — hand-escaping only has to miss one character for the string to end somewhere unexpected. Both were added on 2026-11-19 and follow the same logic as the Mac build (which has been tested); on Windows they have not yet been compiled or tested.
 
 The `client_id` is the same one the Mac build uses (a constant in `GoogleDesktopSignIn.cs`) — Google Cloud Console's "Authorized redirect URIs" is an exact string match, and the Mac build already has `http://127.0.0.1:53682/callback` registered, so Windows reuses the same port/path without needing a separate registration.
 
 `HttpListener` (.NET's HTTP.SYS wrapper) was deliberately avoided: on some Windows setups, listening on an HTTP prefix as a non-administrator requires a `netsh` URL ACL reservation beforehand, and users shouldn't have to run an admin command just to sign in. A raw `TcpListener` is used instead, manually parsing the minimal HTTP request/response needed — the same reasoning as the Mac build's direct use of `NWListener` at the raw TCP level.
 
-**Bug hit: sign-in occasionally stuck on "no id_token received"**. The loopback listener originally accepted only the first connection and then closed; if an extra connection grabbed that single accept first (for example the browser's connection pre-warming), the real callback carrying the `id_token` was refused because the listener was already closed. It now loops accepting connections until an `id_token` is parsed or the overall timeout (300 seconds) elapses. Reproduced locally with a real Google account and confirmed fixed. A debug log is written to `%LocalAppData%\ZhCnToTw\oauth_debug.log`; the `id_token` is redacted before being written to disk, keeping only its length for comparison.
+**Bug hit: sign-in occasionally stuck on "no id_token received"**. The loopback listener originally accepted only the first connection and then closed; if an extra connection grabbed that single accept first (for example the browser's connection pre-warming), the real callback carrying the `id_token` was refused because the listener was already closed. It now loops accepting connections until a callback passes the checks or the overall timeout (300 seconds) elapses. Reproduced locally with a real Google account and confirmed fixed. A debug log is written to `%LocalAppData%\ZhCnToTw\oauth_debug.log`; the `id_token` is redacted before being written to disk, keeping only its length for comparison.
 
 ### Bug hit during testing: the Windows build was misidentified as an outdated Mac build
 
@@ -446,7 +454,7 @@ A few deliberate decisions and pitfalls:
 
 ### Downloads go to the Desktop
 
-Every Stage's "download result" buttons use the standard `fetch` + blob + `<a download>` path, which WebView2 handles natively. The `DownloadStarting` event redirects the save directory from the system "Downloads" folder to the Desktop, with `UniqueDestination` adding ` (1)`, ` (2)` suffixes so a previous download of the same name isn't overwritten. The `legacyDownload` channel is implemented too (also writing to the Desktop), but `script.js` only takes that path when `osTier === "10.15"`, so it is never actually triggered on Windows and exists only as a fallback.
+Every Stage's "download result" buttons use the standard `fetch` + blob + `<a download>` path, which WebView2 handles natively. The `DownloadStarting` event redirects the save directory from the system "Downloads" folder to the Desktop, with `UniqueDestination` adding ` (1)`, ` (2)` suffixes so a previous download of the same name isn't overwritten. The `legacyDownload` channel (the page hands file content to the shell to write; only the Mac `10.15` build needs it) is not provided by this shell: the injected shim doesn't define it, and the page won't call a channel it can't detect — a channel that lets the page tell the shell to write a file stays closed unless it is needed.
 
 ### File Structure
 

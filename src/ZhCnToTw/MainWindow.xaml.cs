@@ -12,7 +12,7 @@ namespace ZhCnToTw;
 public partial class MainWindow : Window
 {
     // zh-cn-to-tw-web 的 script.js 是針對 WKWebView 寫的：desktopSignIn/
-    // ocrService/activityGuard/legacyDownload 這幾個管道全部直接呼叫
+    // ocrService/activityGuard 這幾個管道全部直接呼叫
     // window.webkit.messageHandlers.<name>.postMessage(...)，這是
     // Safari/WebKit 專有的橋接 API，Chromium 為底的 WebView2 沒有這個
     // 全域物件。刻意不改 zh-cn-to-tw-web（那是 Mac/Windows 共用的前端，
@@ -20,6 +20,11 @@ public partial class MainWindow : Window
     // 轉送到 WebView2 原生的 window.chrome.webview.postMessage，殼再用
     // WebMessageReceived 依 channel 分派——網頁那邊完全不用知道自己現在
     // 是跑在哪一種殼上面。
+    //
+    // 只補這個殼真的會處理的管道。legacyDownload（網頁把檔案內容交給殼
+    // 寫檔）是 Mac 10.15 那包才需要的：這裡的下載走 WebView2 自己的
+    // DownloadStarting，用不到——讓網頁直接叫殼寫檔的管道，沒有需要就不開。
+    // 網頁用「這個管道存不存在」判斷能不能用，這裡不補，它就不會去呼叫。
     private const string BridgeShimScript = """
         (function () {
           if (window.webkit && window.webkit.messageHandlers) return;
@@ -35,8 +40,7 @@ public partial class MainWindow : Window
               consoleLog: handler('consoleLog'),
               desktopSignIn: handler('desktopSignIn'),
               ocrService: handler('ocrService'),
-              activityGuard: handler('activityGuard'),
-              legacyDownload: handler('legacyDownload')
+              activityGuard: handler('activityGuard')
             }
           };
         })();
@@ -54,6 +58,10 @@ public partial class MainWindow : Window
     // 其他常駐狀態一樣掛在 Window 生命週期上，避免使用者按了登入之後
     // 這個物件被提早回收。
     private GoogleDesktopSignIn? _activeSignIn;
+
+    // 殼自己載入的那一頁的網址。網頁送來的訊息，只收來源跟它相同的，
+    // 見 IsFromOwnPage。
+    private Uri? _pageUri;
 
     private readonly OcrServiceManager _ocrServiceManager = new(OcrServiceManager.ResolveExecutable);
 
@@ -189,10 +197,12 @@ public partial class MainWindow : Window
                     break;
                 }
                 await ClearDiskCacheAsync(core);
-                Browser.Source = BuildDesktopUrl($"https://{WebVirtualHost}/index.html");
+                _pageUri = BuildDesktopUrl($"https://{WebVirtualHost}/index.html");
+                Browser.Source = _pageUri;
                 break;
             case WebSourceKind.RemoteOverride:
-                Browser.Source = BuildDesktopUrl(target);
+                _pageUri = BuildDesktopUrl(target);
+                Browser.Source = _pageUri;
                 break;
             case WebSourceKind.NotFound:
                 Browser.NavigateToString(
@@ -291,10 +301,36 @@ public partial class MainWindow : Window
         Browser.CoreWebView2?.Reload();
     }
 
+    /// <summary>
+    /// 這則訊息是不是殼自己載入的那一頁送來的：來源（scheme、主機、port）
+    /// 要跟殼載入的網址一樣。
+    ///
+    /// 訊息能做的事（開始登入、啟動 OCR）只該給殼自己的頁面用；WebView
+    /// 萬一被帶到別的網站，那個網站一樣呼叫得到
+    /// window.chrome.webview.postMessage，所以每一則都要看是誰送的。
+    /// 依 WebView2 的文件，CoreWebView2.WebMessageReceived 只會收到最外層
+    /// 文件送的訊息（iframe 送的走 CoreWebView2Frame 自己的事件，這個殼
+    /// 沒有訂閱），所以這裡只需要比來源。
+    /// </summary>
+    private bool IsFromOwnPage(string? source)
+    {
+        if (_pageUri is null || string.IsNullOrEmpty(source)) return false;
+        if (!Uri.TryCreate(source, UriKind.Absolute, out var senderUri)) return false;
+        return string.Equals(senderUri.Scheme, _pageUri.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(senderUri.Host, _pageUri.Host, StringComparison.OrdinalIgnoreCase)
+            && senderUri.Port == _pageUri.Port;
+    }
+
     private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         try
         {
+            if (!IsFromOwnPage(e.Source))
+            {
+                System.Diagnostics.Trace.WriteLine("[webview-bridge] 略過不是自己頁面送來的訊息");
+                return;
+            }
+
             using var doc = JsonDocument.Parse(e.WebMessageAsJson);
             var root = doc.RootElement;
             var channel = root.GetProperty("channel").GetString();
@@ -314,9 +350,6 @@ public partial class MainWindow : Window
                 case "activityGuard":
                     HandleActivityGuard(body);
                     break;
-                case "legacyDownload":
-                    HandleLegacyDownload(body);
-                    break;
                 default:
                     System.Diagnostics.Trace.WriteLine($"[webview-bridge] 不認得的 channel：{channel}");
                     break;
@@ -335,12 +368,18 @@ public partial class MainWindow : Window
         try
         {
             var idToken = await signIn.StartAsync();
-            var escaped = idToken.Replace("'", "\\'");
             // 網頁原本 Google Identity Services 登入成功時就是呼叫這個
             // 函式（見 script.js 的 handleCredentialResponse）——桌面版
             // 系統瀏覽器登入完成後只是換一種方式把 token 交回網頁，後續
             // 驗證/儲存/UI 更新完全沿用網頁原本的邏輯。
-            await Browser.CoreWebView2.ExecuteScriptAsync($"handleCredentialResponse({{credential: '{escaped}'}})");
+            //
+            // token 是從本機那個 port 收進來的內容，放進 JS 之前一律用
+            // JsonSerializer 轉成字串字面值（跟下面失敗那條路同一個做法），
+            // 不自己跳脫字元：自己跳脫只要漏掉一種字元，字串就會在預期
+            // 之外的地方結束，後面的內容被當成程式執行。GoogleDesktopSignIn
+            // 已經只放行 JWT 形狀的值，這裡是第二道。
+            var tokenLiteral = JsonSerializer.Serialize(idToken);
+            await Browser.CoreWebView2.ExecuteScriptAsync($"handleCredentialResponse({{credential: {tokenLiteral}}})");
             Activate();
         }
         catch (Exception ex)
@@ -410,38 +449,6 @@ public partial class MainWindow : Window
             default:
                 System.Diagnostics.Trace.WriteLine($"[activity-guard] 不認得的指令：{action}");
                 break;
-        }
-    }
-
-    /// <summary>
-    /// 對應 Mac 版 12- 分流的 legacyDownload channel：網頁把檔案內容轉成
-    /// base64 直接 postMessage 過來，這裡解碼寫進桌面。script.js 只有在
-    /// osTier === "12-" 才會走這條路，這支殼固定回報 "windows"（見
-    /// BuildDesktopUrl），正常情況下載會走 DownloadStarting 那條標準
-    /// 路徑，不會用到這裡——這裡實作只是求完整、當作備援，不是目前預期
-    /// 會被觸發的路徑。
-    /// </summary>
-    private static void HandleLegacyDownload(JsonElement body)
-    {
-        if (body.ValueKind != JsonValueKind.Object
-            || !body.TryGetProperty("filename", out var filenameEl)
-            || !body.TryGetProperty("base64", out var base64El))
-        {
-            System.Diagnostics.Trace.WriteLine("[legacy-download] 收到的訊息格式不對");
-            return;
-        }
-
-        var filename = filenameEl.GetString() ?? "download";
-        try
-        {
-            var data = Convert.FromBase64String(base64El.GetString() ?? "");
-            var desktopDir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-            var destination = UniqueDestination(desktopDir, filename);
-            File.WriteAllBytes(destination, data);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Trace.WriteLine($"[legacy-download] 寫檔失敗：{ex}");
         }
     }
 
