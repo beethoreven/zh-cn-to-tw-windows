@@ -252,14 +252,16 @@ internal sealed class OcrServiceManager
             return (bundled, "", Path.GetDirectoryName(bundled)!);
         }
 
-        var devPath = Environment.GetEnvironmentVariable("OCR_SERVICE_DEV_PATH");
-        if (!string.IsNullOrEmpty(devPath) && File.Exists(devPath))
+        // 下面兩個開發用的環境變數只有 Debug 版讀得到（見
+        // MainWindow.DevelopmentOverride）：它們能讓 App 去執行任何一個程式
+        var devPath = MainWindow.DevelopmentOverride("OCR_SERVICE_DEV_PATH");
+        if (devPath is not null && File.Exists(devPath))
         {
             return (devPath, "", Path.GetDirectoryName(devPath)!);
         }
 
-        var devPythonDir = Environment.GetEnvironmentVariable("OCR_SERVICE_DEV_PYTHON_DIR");
-        if (!string.IsNullOrEmpty(devPythonDir))
+        var devPythonDir = MainWindow.DevelopmentOverride("OCR_SERVICE_DEV_PYTHON_DIR");
+        if (devPythonDir is not null)
         {
             var pythonExe = Path.Combine(devPythonDir, "venv", "Scripts", "python.exe");
             return (pythonExe, "app.py", devPythonDir);

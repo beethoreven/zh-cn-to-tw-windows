@@ -111,6 +111,40 @@ public partial class MainWindow : Window
         var core = Browser.CoreWebView2;
         await core.AddScriptToExecuteOnDocumentCreatedAsync(BridgeShimScript);
         core.WebMessageReceived += OnWebMessageReceived;
+#if !DEBUG
+        // 正式版關掉 DevTools（F12、右鍵「檢查」）：它能讀到 localStorage 裡
+        // 的登入 session、在頁面裡執行任意程式，同一台電腦上的其他人都能
+        // 打開。開發時（Debug 設定，例如 dotnet run）照常可以用。
+        core.Settings.AreDevToolsEnabled = false;
+#endif
+        // 只在這個視窗裡打開自己頁面的來源（見 IsAllowedInAppNavigation）。
+        // 這個殼沒有網址列，任何網站在這裡打開，使用者都分不出那是不是這個
+        // App 的畫面。使用者自己點的 http(s) 連結改用系統瀏覽器開，其他
+        // （頁面程式改網址、轉址）直接擋下。
+        core.NavigationStarting += (_, args) =>
+        {
+            if (IsAllowedInAppNavigation(args.Uri, _pageUri)) return;
+            args.Cancel = true;
+            if (args.IsUserInitiated && IsWebUrl(args.Uri))
+            {
+                OpenInSystemBrowser(args.Uri);
+            }
+            else
+            {
+                System.Diagnostics.Trace.WriteLine("[webview-nav] 擋下導覽到其他來源");
+            }
+        };
+        // 網頁要開新視窗（window.open()、target="_blank"）時一律不在 App 裡開：
+        // 使用者自己點的 http(s) 連結交給系統瀏覽器，其他直接忽略。Handled 設成
+        // true、又不給 NewWindow，WebView2 就不會開出新視窗。
+        core.NewWindowRequested += (_, args) =>
+        {
+            args.Handled = true;
+            if (args.IsUserInitiated && IsWebUrl(args.Uri))
+            {
+                OpenInSystemBrowser(args.Uri);
+            }
+        };
         // 對應 Mac 版 webViewWebContentProcessDidTerminate：背後的
         // render process 被系統砍掉時的通知。WebView2 對這種狀況比
         // WKWebView 穩健，通常直接 Reload() 就能恢復，先不做到 Mac 版
@@ -248,7 +282,7 @@ public partial class MainWindow : Window
     /// </summary>
     private Uri BuildDesktopUrl(string baseUrl)
     {
-        var apiBase = Environment.GetEnvironmentVariable("WEB_API_BASE_OVERRIDE")
+        var apiBase = DevelopmentOverride("WEB_API_BASE_OVERRIDE")
             ?? "https://zh-cn-to-tw-backend.onrender.com";
         var separator = baseUrl.Contains('?') ? '&' : '?';
         var query = string.Join("&",
@@ -461,6 +495,68 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 開發用的環境變數（例如 WEB_API_BASE_OVERRIDE）。只有 Debug 版才讀；
+    /// 正式版（安裝檔用 Release 設定編譯，見 packaging/build_installer.bat）
+    /// 一律當作沒設。這些變數能讓 App 連到別的後端、載入別的網頁、執行別的
+    /// 程式，對裝好的 App 來說等於多一個讓別人改變它行為的入口。
+    /// </summary>
+    internal static string? DevelopmentOverride(string name)
+    {
+#if DEBUG
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrEmpty(value) ? null : value;
+#else
+        return null;
+#endif
+    }
+
+    /// <summary>
+    /// 這個網址能不能在 App 的視窗裡打開：跟殼載入的頁面同來源（scheme、
+    /// 主機、port），或是 about:／data:（殼自己用 NavigateToString 顯示的
+    /// 錯誤頁），或是自己頁面產生的 blob: 網址（blob:https://zh-cn-to-tw.example/...，
+    /// 來源寫在 blob: 後面）。
+    /// </summary>
+    private static bool IsAllowedInAppNavigation(string? uri, Uri? page)
+    {
+        if (string.IsNullOrEmpty(uri)) return false;
+        // about:／data: 用字串判斷，不交給 Uri 解析：Uri 有長度上限，太長的
+        // data: 網址會解析失敗，殼自己的錯誤頁就會被擋掉
+        if (uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)
+            || uri.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        if (page is null) return false;
+        if (uri.StartsWith("blob:", StringComparison.OrdinalIgnoreCase))
+        {
+            return Uri.TryCreate(uri.Substring("blob:".Length), UriKind.Absolute, out var inner)
+                && IsSameOrigin(inner, page);
+        }
+        return Uri.TryCreate(uri, UriKind.Absolute, out var target) && IsSameOrigin(target, page);
+    }
+
+    private static bool IsSameOrigin(Uri a, Uri b) =>
+        string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(a.Host, b.Host, StringComparison.OrdinalIgnoreCase)
+        && a.Port == b.Port;
+
+    private static bool IsWebUrl(string? uri) =>
+        Uri.TryCreate(uri, UriKind.Absolute, out var target)
+        && (target.Scheme == Uri.UriSchemeHttp || target.Scheme == Uri.UriSchemeHttps);
+
+    private static void OpenInSystemBrowser(string uri)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.WriteLine($"[webview-nav] 無法用系統瀏覽器開啟：{ex.Message}");
+        }
+    }
+
     // 這個 App 只會存這兩種檔案（網頁那邊也只收這兩種，見 zh-cn-to-tw-web
     // 的 js/core/filename.js）。殼再擋一次，網頁萬一出問題（例如被塞進
     // 不該有的內容），也沒辦法讓殼把其他類型的檔案存進使用者的電腦。
@@ -504,7 +600,8 @@ public partial class MainWindow : Window
     /// webURL：
     ///   1. WEB_BASE_URL_OVERRIDE 環境變數 -- 開發階段用，指到本機另外跑的
     ///      網頁伺服器（例如 python3 -m http.server），測試還沒進打包產物
-    ///      的前端改動。回傳的是網址。
+    ///      的前端改動。回傳的是網址。只有 Debug 版讀得到（見
+    ///      DevelopmentOverride）。
     ///   2. 執行檔旁邊的 web/ 資料夾 -- Stage 3 的 build 腳本會把
     ///      zh-cn-to-tw-web 的內容複製到這裡，對應 Mac 版 .app 內的
     ///      Contents/Resources/web/。回傳的是資料夾路徑（要拿去做虛擬
@@ -517,8 +614,8 @@ public partial class MainWindow : Window
     /// </summary>
     private static (WebSourceKind, string) ResolveWebSource()
     {
-        var overrideUrl = Environment.GetEnvironmentVariable("WEB_BASE_URL_OVERRIDE");
-        if (!string.IsNullOrEmpty(overrideUrl))
+        var overrideUrl = DevelopmentOverride("WEB_BASE_URL_OVERRIDE");
+        if (overrideUrl is not null)
         {
             return (WebSourceKind.RemoteOverride, overrideUrl);
         }

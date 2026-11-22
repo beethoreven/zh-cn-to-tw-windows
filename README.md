@@ -154,7 +154,7 @@ Mac 版的版本號在別的地方（`Info.plist`），兩邊沒有共用機制�
 
 1. `dotnet publish`（self-contained、win-x64、Release）到 `packaging\staging\app\`——self-contained 所以使用者機器不需要另外裝 .NET。
 2. 把 `zh-cn-to-tw-web` 整份複製進 `staging\app\web\`。
-3. 用 `zh-cn-to-tw-ocr-service` 自己的 venv 跑 PyInstaller 重新打包，複製進 `staging\app\ocr-service\`。
+3. 先照 `requirements.txt`、`requirements-build.txt` 同步 `zh-cn-to-tw-ocr-service` 自己的 venv，再跑 PyInstaller 重新打包，複製進 `staging\app\ocr-service\`。同步這一步不能省：PyInstaller 包進去的是 venv 裡實際裝著的套件版本，不是 requirements 檔寫的版本，只改了 requirements 檔（例如升級套件修安全弱點）卻沒重裝，包進去的還是舊版，而且不會有任何錯誤。版本都釘死了，venv 已經一致時 pip 只檢查、不下載；同步失敗就中止打包。
 4. 呼叫 Inno Setup 的 `ISCC.exe`，把 `staging\app\` 整個封裝成 `packaging\dist\ZhCnToTw-Setup-<版本>.exe`。
 
 每一步都是真的重新 build，不沿用舊產物：「打包給人用」的腳本如果沿用舊產物，會把過期的內容包成一個看起來全新的檔名，測起來像是修正沒生效。meta-repo 根目錄的 `build_app_exe.bat` 是入口，先清掉 `bin/`、`obj/` 再呼叫這支腳本。實測 1.7 的安裝檔約 137MB，`staging\app\` 展開約 442MB。
@@ -166,6 +166,16 @@ Mac 版的版本號在別的地方（`Info.plist`），兩邊沒有共用機制�
 - **PyInstaller 偶發 `FileNotFoundError`**：PyInstaller 寫出 exe 後立刻想重新開啟它設定時間戳記，被防毒軟體即時掃描鎖住檔案。這個錯誤不在 PyInstaller 自己 `_retry_operation` 的白名單裡，一次沒中就直接放棄；同一個指令手動重跑幾次會成功，確認是暫時性問題。腳本因此自己重試整個 PyInstaller 呼叫，最多 3 次。
 - **批次檔不用多行括號區塊**：在這個環境下，`cmd.exe` 對 `if`/`for` 的多行 `( ... )` 主體解析不可靠——即使該分支的條件不成立，整支腳本也會無聲中斷，沒有任何錯誤訊息。全部改用單行 `if X goto label` 之後穩定下來。路徑也先用 `%%~f` 正規化，帶 `..\..` 的未正規化路徑同樣讓 `if exist` 無聲失效過。
 - **批次檔刻意只用 ASCII**：`cmd.exe` 對非 ASCII 原始碼編碼（BOM、codepage）的處理不一致，寫這支腳本時直接撞過，所以兩支 `.bat` 都沒有中文註解。
+
+### 正式版收起開發用入口，只打開自己的頁面
+
+- **開發用的環境變數只有 Debug 版讀**：`WEB_BASE_URL_OVERRIDE`、`WEB_API_BASE_OVERRIDE`、`OCR_SERVICE_DEV_PATH`、`OCR_SERVICE_DEV_PYTHON_DIR`（`MainWindow.DevelopmentOverride`）。這些變數能讓 App 連到別的後端、載入別的網頁、執行別的程式。安裝檔由 `packaging/build_installer.bat` 用 `-c Release` 編譯，`#if DEBUG` 分得開；`dotnet run` 預設是 Debug，開發時照常可以用。
+- **正式版關掉 DevTools**（`CoreWebView2.Settings.AreDevToolsEnabled = false`，只在 Release）：DevTools 能讀到 localStorage 裡的登入 session、在頁面裡執行任意程式，同一台電腦上的其他人都能打開。
+- **只打開自己的頁面**：`NavigationStarting` 只放行跟殼載入的頁面同來源的網址、`about:`／`data:`（殼自己用 `NavigateToString` 顯示的錯誤頁），以及自己頁面產生的 `blob:` 網址（`IsAllowedInAppNavigation`）。使用者自己點的 http(s) 連結交給系統瀏覽器，其他直接擋下。原本完全沒有限制，這個殼沒有網址列，任何網站在這裡打開，使用者都分不出那是不是這個 App 的畫面。
+- **不開新視窗**：`NewWindowRequested` 一律 `Handled = true`、不給新視窗；使用者點的 http(s) 連結交給系統瀏覽器。
+- 網頁本身另外有 CSP（見 `zh-cn-to-tw-web` 的 README「頁面的安全設定」）。殼用 `AddScriptToExecuteOnDocumentCreatedAsync` 注入的 shim 與 `ExecuteScriptAsync` 是由殼注入、不是頁面自己載入的，照理不受網頁的 CSP 限制（Mac 版對應的機制實測不受影響），但 Windows 上還沒實測——要是被擋，殼跟網頁之間的訊息會整個斷掉（登入、OCR 都會失效），出新版前一定要先在 Windows 上確認。
+
+這些跟 Mac 版同一套邏輯（Mac 版已用真的 WKWebView 實測），Windows 這邊還沒有編譯與實測過。
 
 ### 下載存到桌面
 
@@ -245,7 +255,7 @@ dotnet run
 
 ## Part C. 環境變數總覽
 
-全部都是開發階段用的，正式安裝的版本不需要設任何一個。
+全部都是開發階段用的，正式安裝的版本不需要設任何一個。前四個只有 Debug 設定編出來的版本（例如 `dotnet run`）才會讀，安裝檔是用 Release 設定編的，設了也沒有作用（見專案報告「正式版收起開發用入口，只打開自己的頁面」）。
 
 | 變數 | 必填 | 說明 |
 |---|---|---|
@@ -263,7 +273,7 @@ dotnet run
 build_app_exe.bat
 ```
 
-它會清掉 `bin/`、`obj/`、`packaging\staging\`、`packaging\dist\`，然後依序跑 `dotnet publish`、複製前端、PyInstaller 重新打包 OCR 服務、Inno Setup 封裝。整個流程約數分鐘，產物在 `zh-cn-to-tw-windows\packaging\dist\ZhCnToTw-Setup-<版本>.exe`。
+它會清掉 `bin/`、`obj/`、`packaging\staging\`、`packaging\dist\`，然後依序跑 `dotnet publish`、複製前端、同步 OCR 服務的 venv 套件並用 PyInstaller 重新打包、Inno Setup 封裝。整個流程約數分鐘，產物在 `zh-cn-to-tw-windows\packaging\dist\ZhCnToTw-Setup-<版本>.exe`。
 
 如果第 3 步連續三次失敗並提示防毒軟體，把 `zh-cn-to-tw-ocr-service` 資料夾加進防毒軟體即時掃描的排除清單後重跑。
 
@@ -447,7 +457,7 @@ The Mac build's version lives elsewhere (`Info.plist`) and nothing is shared bet
 
 1. `dotnet publish` (self-contained, win-x64, Release) into `packaging\staging\app\` — self-contained so the user's machine needs no separate .NET install.
 2. Copies all of `zh-cn-to-tw-web` into `staging\app\web\`.
-3. Re-packages with PyInstaller using `zh-cn-to-tw-ocr-service`'s own venv, and copies the result into `staging\app\ocr-service\`.
+3. First syncs `zh-cn-to-tw-ocr-service`'s own venv with `requirements.txt` and `requirements-build.txt`, then re-packages with PyInstaller and copies the result into `staging\app\ocr-service\`. The sync can't be skipped: PyInstaller bundles the package versions actually installed in the venv, not the ones the requirements files name, so changing a requirements file (for example, upgrading a package to fix a security vulnerability) without reinstalling would still ship the old version, with no error at all. Every version is pinned, so when the venv already matches, pip only checks and downloads nothing; if the sync fails, packaging stops.
 4. Calls Inno Setup's `ISCC.exe` to wrap all of `staging\app\` into `packaging\dist\ZhCnToTw-Setup-<version>.exe`.
 
 Every step genuinely rebuilds and never reuses stale output: a "package for distribution" script that reuses old output wraps stale content under a fresh-looking filename, which then looks like a fix that didn't work. `build_app_exe.bat` at the meta-repo root is the entry point; it cleans `bin/` and `obj/` first, then calls this script. Measured for 1.7: the installer is about 137MB, and `staging\app\` unpacked is about 442MB.
@@ -459,6 +469,16 @@ A few deliberate decisions and pitfalls:
 - **Intermittent PyInstaller `FileNotFoundError`**: right after writing the exe, PyInstaller tries to re-open it to set the timestamp, and real-time antivirus scanning has the file locked. This error isn't on PyInstaller's own `_retry_operation` allowlist, so it gives up after one miss; rerunning the exact same command by hand a few times succeeds, confirming it is transient. The script therefore retries the entire PyInstaller invocation itself, up to 3 times.
 - **No multi-line parenthesized blocks in the batch files**: in this environment `cmd.exe` parses multi-line `( ... )` bodies of `if`/`for` unreliably — the whole script would silently abort with no error message even when that branch's condition was false. Switching everything to single-line `if X goto label` made it stable. Paths are also normalized up front with `%%~f`; an un-normalized path containing `..\..` likewise made `if exist` fail silently.
 - **Batch files are deliberately ASCII-only**: `cmd.exe` handles non-ASCII source encoding (BOM, codepage) inconsistently, hit directly while writing this script, so neither `.bat` has Chinese comments.
+
+### A Release Build Keeps Developer Entry Points Closed and Opens Only Its Own Page
+
+- **Development environment variables are read only by Debug builds**: `WEB_BASE_URL_OVERRIDE`, `WEB_API_BASE_OVERRIDE`, `OCR_SERVICE_DEV_PATH`, `OCR_SERVICE_DEV_PYTHON_DIR` (`MainWindow.DevelopmentOverride`). These variables can make the app talk to another backend, load another page, or run another program. The installer is compiled by `packaging/build_installer.bat` with `-c Release`, so `#if DEBUG` separates the two; `dotnet run` defaults to Debug, so development is unaffected.
+- **DevTools are off in release builds** (`CoreWebView2.Settings.AreDevToolsEnabled = false`, Release only): DevTools can read the login session in localStorage and run arbitrary code in the page, and anyone else using the same computer could open them.
+- **Only its own page is opened**: `NavigationStarting` allows only URLs on the same origin as the page the shell loaded, `about:` / `data:` (the error pages the shell shows with `NavigateToString`), and `blob:` URLs created by the shell's own page (`IsAllowedInAppNavigation`). http(s) links the user clicks open in the system browser; anything else is blocked. Previously there was no restriction at all; this shell has no address bar, so with any website opened inside it the user couldn't tell whether they were still looking at this app.
+- **No new windows**: `NewWindowRequested` always sets `Handled = true` without providing a new window; http(s) links the user clicks go to the system browser.
+- The page itself also has a CSP (see "Page Security Settings" in `zh-cn-to-tw-web`'s README). The shim injected with `AddScriptToExecuteOnDocumentCreatedAsync` and code run with `ExecuteScriptAsync` are injected by the shell rather than loaded by the page, so they should not be restricted by the page's CSP (the Mac build's equivalent mechanisms were tested and are unaffected), but this has not been tested on Windows yet — if they were blocked, messaging between the shell and the page would break entirely (sign-in and OCR would both fail), so confirm it on Windows before shipping a new version.
+
+This follows the same logic as the Mac build (tested there with a real WKWebView); on Windows it has not yet been compiled or tested.
 
 ### Downloads go to the Desktop
 
@@ -539,7 +559,7 @@ dotnet run
 
 ## Part C. Environment Variables
 
-All of these are for development only; an installed release build needs none of them.
+All of these are for development only; an installed release build needs none of them. The first four are read only by builds compiled with the Debug configuration (e.g. `dotnet run`); the installer is built with the Release configuration, where setting them has no effect (see "A Release Build Keeps Developer Entry Points Closed and Opens Only Its Own Page" in the Project Report).
 
 | Variable | Required | Description |
 |---|---|---|
@@ -557,7 +577,7 @@ Run from the meta-repo root:
 build_app_exe.bat
 ```
 
-It cleans `bin/`, `obj/`, `packaging\staging\`, and `packaging\dist\`, then runs `dotnet publish`, copies the frontend, re-packages the OCR service with PyInstaller, and wraps everything with Inno Setup. The whole process takes a few minutes; the output is `zh-cn-to-tw-windows\packaging\dist\ZhCnToTw-Setup-<version>.exe`.
+It cleans `bin/`, `obj/`, `packaging\staging\`, and `packaging\dist\`, then runs `dotnet publish`, copies the frontend, syncs the OCR service's venv packages and re-packages it with PyInstaller, and wraps everything with Inno Setup. The whole process takes a few minutes; the output is `zh-cn-to-tw-windows\packaging\dist\ZhCnToTw-Setup-<version>.exe`.
 
 If step 3 fails three times in a row with the antivirus hint, add the `zh-cn-to-tw-ocr-service` folder to your antivirus's real-time scanning exclusions and rerun.
 

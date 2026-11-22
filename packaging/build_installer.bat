@@ -78,6 +78,21 @@ echo Cannot find %OCR_VENV_PY%
 echo Set up the venv first per zh-cn-to-tw-ocr-service's README (Setup Guide, Windows steps)
 exit /b 1
 :ocr_venv_found
+rem Sync the venv with the requirements files first. PyInstaller bundles the
+rem package versions actually installed in the venv, not the ones the
+rem requirements files name, so a version bump there (a security upgrade, for
+rem example) would otherwise never reach the installer, with no error or
+rem warning. Every requirement is pinned: when the venv already matches, pip
+rem only checks and downloads nothing.
+echo Syncing the ocr-service venv with requirements.txt and requirements-build.txt
+"%OCR_VENV_PY%" -m pip install --disable-pip-version-check -r "%OCR_REPO%\requirements.txt" -r "%OCR_REPO%\requirements-build.txt"
+if errorlevel 1 goto ocr_sync_failed
+goto ocr_sync_done
+:ocr_sync_failed
+echo Syncing the ocr-service venv failed, see pip's output above.
+echo Stopping here: packaging without the sync could ship outdated packages.
+exit /b 1
+:ocr_sync_done
 rem PyInstaller occasionally fails here with a FileNotFoundError while
 rem trying to re-open the exe it just wrote (winutils.set_exe_build_timestamp
 rem / the bootloader copy step) -- real-time antivirus scanning grabbing the
