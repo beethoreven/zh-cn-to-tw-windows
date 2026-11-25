@@ -228,11 +228,11 @@ packaging/
 ### 2. 要打包成安裝檔，另外還需要
 
 1. **Inno Setup 6**——`winget install --id JRSoftware.InnoSetup`。腳本會依序在 `%LOCALAPPDATA%\Programs\Inno Setup 6\`、`%ProgramFiles(x86)%\Inno Setup 6\`、`%ProgramFiles%\Inno Setup 6\` 找 `ISCC.exe`。
-2. **`zh-cn-to-tw-ocr-service` 的 venv**——打包腳本會直接用 `zh-cn-to-tw-ocr-service\venv\Scripts\python.exe` 跑 PyInstaller，找不到就中止。venv（虛擬環境）是一個獨立的 Python 套件安裝目錄，避免跟系統的 Python 互相干擾。第一次要先建好：
+2. **`zh-cn-to-tw-ocr-service` 的 venv**——打包腳本會直接用 `zh-cn-to-tw-ocr-service\venv\Scripts\python.exe` 跑 PyInstaller，找不到就中止。venv（虛擬環境）是一個獨立的 Python 套件安裝目錄，避免跟系統的 Python 互相干擾。Python 要用 3.12，跟 Mac 那包一致（先裝 python.org 的 3.12 安裝檔，會一起裝 `py` 啟動器）；venv 不是 3.12 的話打包腳本會中止。之前用其他版本建的 venv 要整個刪掉重建。第一次要先建好：
 
 ```powershell
 cd ..\zh-cn-to-tw-ocr-service
-python -m venv venv
+py -3.12 -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt -r requirements-build.txt
 ```
@@ -532,11 +532,11 @@ packaging/
 ### 2. Additionally needed for packaging an installer
 
 1. **Inno Setup 6** — `winget install --id JRSoftware.InnoSetup`. The script looks for `ISCC.exe` in `%LOCALAPPDATA%\Programs\Inno Setup 6\`, `%ProgramFiles(x86)%\Inno Setup 6\`, and `%ProgramFiles%\Inno Setup 6\`, in that order.
-2. **`zh-cn-to-tw-ocr-service`'s venv** — the packaging script runs PyInstaller directly with `zh-cn-to-tw-ocr-service\venv\Scripts\python.exe` and aborts if it isn't found. A venv (virtual environment) is a self-contained Python package directory that keeps things from interfering with the system Python. Create it once first:
+2. **`zh-cn-to-tw-ocr-service`'s venv** — the packaging script runs PyInstaller directly with `zh-cn-to-tw-ocr-service\venv\Scripts\python.exe` and aborts if it isn't found. A venv (virtual environment) is a self-contained Python package directory that keeps things from interfering with the system Python. It must be Python 3.12, matching the Mac build (install the python.org 3.12 installer first; it also installs the `py` launcher); the packaging script stops if the venv isn't 3.12. A venv created with another version must be deleted and recreated. Create it once first:
 
 ```powershell
 cd ..\zh-cn-to-tw-ocr-service
-python -m venv venv
+py -3.12 -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt -r requirements-build.txt
 ```

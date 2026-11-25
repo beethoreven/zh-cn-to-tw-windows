@@ -78,6 +78,18 @@ echo Cannot find %OCR_VENV_PY%
 echo Set up the venv first per zh-cn-to-tw-ocr-service's README (Setup Guide, Windows steps)
 exit /b 1
 :ocr_venv_found
+rem The venv must be Python 3.12, the same as the Mac build: the locked
+rem requirements only resolve for 3.12 (rapidocr_onnxruntime and onnxruntime
+rem stop at 3.12), and an older venv would fail later with a confusing pip error.
+"%OCR_VENV_PY%" -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)"
+if errorlevel 1 goto ocr_venv_wrong_python
+goto ocr_venv_python_ok
+:ocr_venv_wrong_python
+echo The ocr-service venv is not Python 3.12:
+"%OCR_VENV_PY%" --version
+echo Recreate it with Python 3.12 per zh-cn-to-tw-ocr-service's README (Setup Guide, Windows steps)
+exit /b 1
+:ocr_venv_python_ok
 rem Sync the venv with the requirements files first. PyInstaller bundles the
 rem package versions actually installed in the venv, not the ones the
 rem requirements files name, so a version bump there (a security upgrade, for
