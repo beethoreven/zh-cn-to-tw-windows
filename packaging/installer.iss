@@ -38,8 +38,8 @@ SetupIconFile=AppIcon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
 SolidCompression=yes
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 
 [Tasks]
@@ -57,9 +57,29 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; 使用者的 WebView2 profile（登入 session、cookie）跟 %LocalAppData% 下的
-; ZhCnToTw 資料夾放在一起（見 MainWindow.xaml.cs），但那個資料夾不是
-; {app} 安裝目錄本身，解除安裝不會自動清掉——刻意不在這裡強制刪除：
-; 使用者可能只是重灌想保留登入狀態，跟 Mac 版 Uninstaller.swift 詢問
-; 使用者要不要順便清掉資料的邏輯是同一個考量，只是 Windows 這邊還沒有
-; 對應的詢問 UI，先保守留著不動，需要的話之後再補。
+; 使用者的 WebView2 profile（登入 session、cookie）與登入除錯 log 放在
+; %LocalAppData%\ZhCnToTw（見 MainWindow.xaml.cs、GoogleDesktopSignIn.cs），
+; 那個資料夾不是 {app} 安裝目錄本身，這裡的清單不會刪到它。要不要刪改在
+; 下面的 [Code] 問使用者：只是重灌的人想保留登入狀態，把電腦交給別人或
+; 不再使用的人則要清掉，不然下一個用這台電腦的人打開就是原本的帳號。
+; 跟 Mac 版 Uninstaller.swift 詢問要不要順便清掉資料是同一個考量。
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir: String;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  DataDir := ExpandConstant('{localappdata}\ZhCnToTw');
+  if not DirExists(DataDir) then
+    Exit;
+  { 安靜模式（/SILENT、/VERYSILENT）沒有人能回答，保守留著 }
+  if UninstallSilent then
+    Exit;
+  if MsgBox('要一併刪除這台電腦上的登入狀態與設定嗎？' + #13#10#13#10 +
+            '只是要重新安裝的話選「否」，下次打開不用重新登入。' + #13#10 +
+            '要把電腦交給別人或不再使用的話選「是」。',
+            mbConfirmation, MB_YESNO) = IDYES then
+    DelTree(DataDir, True, True, True);
+end;

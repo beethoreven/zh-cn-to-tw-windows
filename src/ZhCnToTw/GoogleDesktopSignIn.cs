@@ -135,13 +135,23 @@ internal sealed class GoogleDesktopSignIn
         System.Text.RegularExpressions.Regex.Replace(
             text, "id_token=[^&\\s]+", m => $"id_token=(已遮罩，長度 {m.Value.Length - "id_token=".Length})");
 
+    // 除錯 log 的大小上限。每次登入都會寫一筆，不設上限的話會一直長下去；
+    // 超過就把舊的整份換成 .old（只留一份），所以磁碟上最多約兩倍這個大小。
+    private const long DebugLogMaxBytes = 256 * 1024;
+
     private static void LogDebug(string message)
     {
         try
         {
             var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ZhCnToTw");
             Directory.CreateDirectory(dir);
-            File.AppendAllText(Path.Combine(dir, "oauth_debug.log"), $"[{DateTime.Now:HH:mm:ss.fff}] {message}\n\n");
+            var path = Path.Combine(dir, "oauth_debug.log");
+            var info = new FileInfo(path);
+            if (info.Exists && info.Length > DebugLogMaxBytes)
+            {
+                File.Move(path, path + ".old", overwrite: true);
+            }
+            File.AppendAllText(path, $"[{DateTime.Now:HH:mm:ss.fff}] {message}\n\n");
         }
         catch
         {
