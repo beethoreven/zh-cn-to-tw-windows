@@ -12,13 +12,16 @@ namespace ZhCnToTw;
 /// </summary>
 internal sealed class OcrServiceManager
 {
-    // 啟動逾時 + 重試：全部都在本機跑，正常情況下 process 起來、綁好
-    // port、印出那一行，應該是秒等級的事——如果等超過這個時間還沒拿到
-    // port，代表這次啟動大概率是卡住了，直接強制關掉重來，不要無止盡
+    // 啟動逾時 + 重試：等太久還沒拿到 port 就強制關掉重來，不要無止盡
     // 等下去，也不要讓使用者永遠卡在「本機 OCR 服務啟動中」卻不知道
-    //發生什麼事。
-    private const int StartupTimeoutSeconds = 20;
-    private const int MaxStartupAttempts = 3;
+    // 發生什麼事。
+    //
+    // 但門檻不能設成「本機服務應該幾秒就好」：裝好之後第一次啟動，系統
+    // 的防毒（Windows Defender）會先掃過內嵌的上百個執行檔與函式庫，之後
+    // 就快了。同一份 OCR 服務在 Mac 上實測第一次啟動要 49～79 秒、第二次
+    // 不到 2 秒；原本的 20 秒會在掃描途中把它關掉。
+    private const int StartupTimeoutSeconds = 180;
+    private const int MaxStartupAttempts = 2;
 
     public string Token { get; } = GenerateToken();
     public int? Port { get; private set; }
