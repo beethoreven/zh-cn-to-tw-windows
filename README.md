@@ -296,6 +296,8 @@ build_app_exe.bat
 gh release create v1.7 packaging/dist/ZhCnToTw-Setup-1.7.exe --title "繁化助手 1.7（Windows）"
 ```
 
+   這個 repo 開了不可變 Release：Release 一發布，裡面的檔案和 tag 就不能再改、不能刪，避免有人拿到帳號權限後把安裝檔偷換掉，下載頁的連結卻照舊。所以安裝檔一定要在 `gh release create` 這一步一起帶上（它會先建草稿、上傳、再發布），不能先發布再用 `gh release upload` 補；發布之後發現安裝檔有問題，要改版號重新發一版，不能換掉原本的檔案。
+
 4. 到 `zh-cn-to-tw-web` 的 `update-page` 分支，在 `index.html` 的 Windows 區塊最上面新增一個 `.version-block`，連結格式是 `https://github.com/beethoreven/zh-cn-to-tw-windows/releases/download/v<版本>/ZhCnToTw-Setup-<版本>.exe`。新增、不要改寫既有的區塊——舊版要留著供人回退。
 5. 回到 meta-repo，更新這支 submodule 的 pointer 並 commit。
 
@@ -599,6 +601,8 @@ Step 2's output prints which folder was actually copied, so check that the right
 ```bash
 gh release create v1.7 packaging/dist/ZhCnToTw-Setup-1.7.exe --title "繁化助手 1.7（Windows）"
 ```
+
+   This repo has immutable releases turned on: once a Release is published, its files and tag can't be changed or deleted, so someone who gains access to the account can't swap the installer while the download page keeps linking to it. The installer therefore has to be passed to `gh release create` itself (it creates a draft, uploads, then publishes); publishing first and adding the file with `gh release upload` doesn't work. If the installer turns out to be broken after publishing, release a new version number instead of replacing the file.
 
 4. On `zh-cn-to-tw-web`'s `update-page` branch, add a new `.version-block` at the top of the Windows section in `index.html`, with a link of the form `https://github.com/beethoreven/zh-cn-to-tw-windows/releases/download/v<version>/ZhCnToTw-Setup-<version>.exe`. Add a block; don't rewrite existing ones — older versions stay available for rollback.
 5. Back in the meta-repo, update this submodule's pointer and commit.
